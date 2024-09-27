@@ -63,6 +63,7 @@ target_link_libraries(${NAME}
     pimoroni_i2c
     pico_graphics
     pico_display
+    pico_multicore
     bitmap_fonts
     hershey_fonts
     rgbled

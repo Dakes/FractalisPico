@@ -3,6 +3,8 @@
 
 #include <cstdint>
 
+#define MAX_ITER 255
+
 enum PAN_DIRECTION {
     PAN_NONE = 0,
     PAN_UP,
@@ -39,6 +41,8 @@ struct FractalisState {
     // Variables to handle panning
     long double pan_real;    // Pan offset in the real axis
     long double pan_imag;    // Pan offset in the imaginary axis
+
+    bool rendering;
 };
 
 #endif // FRACTALIS_STATE_H
