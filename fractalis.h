@@ -4,6 +4,8 @@
 #include "FractalisState.h"
 #include <complex>
 
+extern const int MAX_ITER;
+
 class Fractalis {
 public:
     Fractalis(FractalisState* state);

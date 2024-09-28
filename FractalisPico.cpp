@@ -11,10 +11,17 @@
 #include <chrono>
 
 #define UPDATE_SLEEP 16
-#define LONG_PRESS_DURATION 200/UPDATE_SLEEP
+#define LONG_PRESS_DURATION 100/UPDATE_SLEEP
 #define PAN_CONSTANT 0.2
 #define ZOOM_CONSTANT 0.2
-#define START_HUE 80
+
+// #define MAX_ITER 50
+constexpr int MAX_ITER = 50;
+
+// defines for color generation
+#define START_HUE 0.6222
+#define SATURATION_THRESHOLD 0.05f
+#define VALUE_THRESHOLD 0.04f
 
 using namespace pimoroni;
 
@@ -78,7 +85,7 @@ int main() {
 void core1_entry() {
     printf("Core1 started\n");
     while(true) {
-        if (!state.rendering) {
+        if (state.rendering <= 0) {
             sleep_ms(16);
             continue;
         }
@@ -134,8 +141,11 @@ void update_display() {
             if (state.pixelState[y][x].iteration >= MAX_ITER) {
                 display.set_pen(0, 0, 0);
             } else {
-                const float hue = (float)state.pixelState[y][x].iteration / (float)MAX_ITER;
-                display.set_pen(display.create_pen_hsv(hue, 1., 1.));
+                float iteration_ratio = (float)state.pixelState[y][x].iteration / (float)MAX_ITER;
+                float hue = fmodf(START_HUE + (float)state.pixelState[y][x].iteration / (float)MAX_ITER, 1.0f);
+                float saturation = std::min(iteration_ratio / SATURATION_THRESHOLD, 1.0f);
+                float value = std::min(iteration_ratio / VALUE_THRESHOLD, 1.0f);
+                display.set_pen(display.create_pen_hsv(hue, saturation, value));
             }
             display.pixel(Point(x, y));
         }
@@ -145,59 +155,72 @@ void update_display() {
 }
 
 void handle_input() {
-    static uint16_t button_pressed_duration = 0;
-    static Button* last_pressed_button = nullptr;
+    enum class ButtonState { IDLE, PRESSED, LONG_PRESSED, HELD };
+    static ButtonState button_states[4] = {ButtonState::IDLE, ButtonState::IDLE, ButtonState::IDLE, ButtonState::IDLE};
+    static uint16_t button_pressed_durations[4] = {0, 0, 0, 0};
+    
+    Button* buttons[4] = {&button_a, &button_b, &button_x, &button_y};
     bool state_changed = false;
 
-    // auto zoom
-    if(button_a.raw()) {
-        last_pressed_button = &button_a;
-        button_pressed_duration++;
-        if (button_pressed_duration > LONG_PRESS_DURATION) {
-            led.set_rgb(255, 0, 255);
-            return;
+    for (int i = 0; i < 4; ++i) {
+        if (buttons[i]->raw()) {
+            if (button_states[i] == ButtonState::IDLE) {
+                button_states[i] = ButtonState::PRESSED;
+                button_pressed_durations[i] = 0;
+            }
+            button_pressed_durations[i]++;
+            
+            if (button_pressed_durations[i] > LONG_PRESS_DURATION && button_states[i] == ButtonState::PRESSED) {
+                button_states[i] = ButtonState::LONG_PRESSED;
+                // Handle long press actions
+                switch (i) {
+                    case 0: // Button A
+                        led.set_rgb(255, 0, 255);
+                        break;
+                    case 1: // Button B
+                        state.pan_imag += PAN_CONSTANT / state.zoom_factor;
+                        state_changed = true;
+                        break;
+                    case 2: // Button X
+                        state.pan_imag -= PAN_CONSTANT / state.zoom_factor;
+                        state_changed = true;
+                        break;
+                    case 3: // Button Y
+                        state.zoom_factor /= (1 + ZOOM_CONSTANT);
+                        state_changed = true;
+                        break;
+                }
+            } else if (button_states[i] == ButtonState::LONG_PRESSED) {
+                button_states[i] = ButtonState::HELD;
+            }
+        } else if (button_states[i] != ButtonState::IDLE) {
+            // Button just released
+            if (button_states[i] == ButtonState::PRESSED) {
+                // Handle short press actions
+                switch (i) {
+                    case 0: // Button A
+                        led.set_rgb(0, 255, 0);
+                        break;
+                    case 1: // Button B
+                        state.pan_real -= PAN_CONSTANT / state.zoom_factor;
+                        state_changed = true;
+                        break;
+                    case 2: // Button X
+                        state.pan_real += PAN_CONSTANT / state.zoom_factor;
+                        state_changed = true;
+                        break;
+                    case 3: // Button Y
+                        state.zoom_factor *= (1 + ZOOM_CONSTANT);
+                        state_changed = true;
+                        break;
+                }
+            }
+            button_states[i] = ButtonState::IDLE;
+            button_pressed_durations[i] = 0;
         }
-        led.set_rgb(0, 255, 0);
-    } else if(button_b.raw()) {  // left
-        last_pressed_button = &button_b;
-        button_pressed_duration++;
-        if (button_pressed_duration > LONG_PRESS_DURATION) {  // down
-            state.pan_imag -= PAN_CONSTANT / state.zoom_factor;
-            state_changed = true;
-            goto handle_input_end;
-        }
-        state.pan_real -= PAN_CONSTANT / state.zoom_factor;
-        state_changed = true;
-    } else if(button_x.raw()) {  // right
-        last_pressed_button = &button_x;
-        button_pressed_duration++;
-        if (button_pressed_duration > LONG_PRESS_DURATION) {  // up
-            state.pan_imag += PAN_CONSTANT / state.zoom_factor;
-            state_changed = true;
-            goto handle_input_end;
-        }
-        state.pan_real += PAN_CONSTANT / state.zoom_factor;
-        state_changed = true;
-    } else if(button_y.raw()) {  // Zoom in and out
-        last_pressed_button = &button_y;
-        if (button_pressed_duration > LONG_PRESS_DURATION) {
-            state.zoom_factor /= 1.1;
-            state_changed = true;
-            goto handle_input_end;
-        }
-        button_pressed_duration++;
-        state.zoom_factor *= 1.1;  // Zoom in
-        state_changed = true;
-    } else {
-        if (last_pressed_button != nullptr) {
-            // button released
-        }
-        button_pressed_duration = 0;
-        last_pressed_button = nullptr;
     }
-    handle_input_end:
-    if (state_changed) {
-        if (state.rendering < 2)
-            state.rendering++;
+
+    if (state_changed && state.rendering < 2) {
+        state.rendering++;
     }
 }

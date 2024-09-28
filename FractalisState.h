@@ -3,7 +3,6 @@
 
 #include <cstdint>
 
-#define MAX_ITER 255
 
 enum PAN_DIRECTION {
     PAN_NONE = 0,
@@ -44,6 +43,9 @@ struct FractalisState {
 
     // tracking, if the screen is rendering and if a new rendering is needed
     uint8_t rendering;
+
+    // dymamic iteration limit. Should be low initially and for a second render increase
+    uint8_t iteration_limit;
 };
 
 #endif // FRACTALIS_STATE_H

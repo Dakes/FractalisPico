@@ -1,6 +1,8 @@
 #include "fractalis.h"
 #include <cmath>
 
+extern const int MAX_ITER;
+
 Fractalis::Fractalis(FractalisState* state) : state(state) {}
 
 std::complex<long double> Fractalis::f_c(const std::complex<long double>& c, const std::complex<long double>& z) {
