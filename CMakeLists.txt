@@ -1,13 +1,30 @@
+# == DO NEVER EDIT THE NEXT LINES for Raspberry Pi Pico VS Code Extension to work ==
+if(WIN32)
+    set(USERHOME $ENV{USERPROFILE})
+else()
+    set(USERHOME $ENV{HOME})
+endif()
+set(sdkVersion 2.0.0)
+set(toolchainVersion 13_2_Rel1)
+set(picotoolVersion 2.0.0)
+set(picoVscode ${USERHOME}/.pico-sdk/cmake/pico-vscode.cmake)
+if (EXISTS ${picoVscode})
+    include(${picoVscode})
+endif()
+# ====================================================================================
 cmake_minimum_required(VERSION 3.12)
 
+set(PICO_BOARD pico2 CACHE STRING "Board type")
+
 # Set PICO_SDK_PATH if not defined
-# if(NOT DEFINED ENV{PICO_SDK_PATH})
-    # set(ENV{PICO_SDK_PATH} "${CMAKE_CURRENT_LIST_DIR}/pico-sdk")
-# endif()
+if(NOT DEFINED ENV{PICO_SDK_PATH})
+    set(ENV{PICO_SDK_PATH} "${CMAKE_CURRENT_LIST_DIR}/pico-sdk")
+endif()
 
 # Set PIMORONI_PICO_PATH directly in CMake
 set(PIMORONI_PICO_PATH "${CMAKE_CURRENT_LIST_DIR}/pimoroni-pico" CACHE PATH "Path to the Pimoroni Pico libraries")
 set(PICO_SDK_PATH "${CMAKE_CURRENT_LIST_DIR}/pico-sdk" CACHE PATH "Path to the Pico sdk")
+# set(PICO_SDK_PATH ${USERHOME}/.pico-sdk CACHE PATH "Path to the Pico sdk")
 
 # Change your executable name to something creative!
 set(NAME FractalisPico)
@@ -88,3 +105,9 @@ install(FILES
 set(CPACK_INCLUDE_TOPLEVEL_DIRECTORY OFF)
 set(CPACK_GENERATOR "ZIP" "TGZ")
 include(CPack)
+
+set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,-Map=${PROJECT_NAME}.map")
+add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+    COMMAND arm-none-eabi-size ${PROJECT_NAME}.elf
+    COMMAND arm-none-eabi-objdump -h -S ${PROJECT_NAME}.elf > ${PROJECT_NAME}.lst
+    VERBATIM)
