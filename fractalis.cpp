@@ -23,6 +23,10 @@ std::complex<long double> Fractalis::pixel_to_point(int x, int y) {
 }
 
 void Fractalis::calculate_pixel(int x, int y) {
+    if (x <= 0 || x > state->screen_w || y <= 0 || y > state->screen_h) {
+        return;
+    }
+
     std::complex<long double> c = pixel_to_point(x, y);
     std::complex<long double> z = 0;
     int iteration = 0;
