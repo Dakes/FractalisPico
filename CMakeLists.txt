@@ -43,6 +43,7 @@ pico_sdk_init()
 # Add your source files
 add_executable(${NAME}
     FractalisPico.cpp # Your main source file
+    fractalis.cpp
 )
 
 # Include required libraries

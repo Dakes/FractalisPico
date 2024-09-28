@@ -7,10 +7,14 @@
 #include "rgbled.hpp"
 #include "button.hpp"
 #include "FractalisState.h"
+#include "fractalis.h"
 #include <chrono>
 
 #define UPDATE_SLEEP 16
 #define LONG_PRESS_DURATION 200/UPDATE_SLEEP
+#define PAN_CONSTANT 0.2
+#define ZOOM_CONSTANT 0.2
+#define START_HUE 80
 
 using namespace pimoroni;
 
@@ -29,14 +33,14 @@ Button button_b(PicoDisplay::B);
 Button button_x(PicoDisplay::X);
 Button button_y(PicoDisplay::Y);
 
-// Fractal state
 FractalisState state;
+Fractalis fractalis(&state);
+
 
 // Function prototypes
 void core1_entry();
 void initialize_state();
 void cleanup_state();
-void calculate_pixel(int x, int y);
 void update_display();
 void handle_input();
 
@@ -46,7 +50,7 @@ int main() {
 
     // Initialize the display
     st7789.set_backlight(255);
-    led.set_brightness(100);
+    led.set_brightness(50);
     printf("Display initialized\n");
 
     // Initialize the fractal state
@@ -82,14 +86,10 @@ void core1_entry() {
         // Continuously calculate pixel values
         for(int y = 0; y < state.screen_h; ++y) {
             for(int x = 0; x < state.screen_w; ++x) {
-                calculate_pixel(x, y);
-
-                if (x == 0 && y == 0) {
-                    printf("Calculated pixel at (%d, %d): iteration=%d\n", x, y, state.pixelState[y][x].iteration);
-                }
+                fractalis.calculate_pixel(x, y);
             }
         }
-        state.rendering = false;
+        state.rendering--;
         printf("Core1: Pixel calculation complete\n");
     }
 }
@@ -109,7 +109,8 @@ void initialize_state() {
     state.zoom_factor = 1.0;
     state.pan_real = 0;
     state.pan_imag = 0;
-    state.rendering = true;  // Set rendering to true initially
+    state.rendering = 1;
+    fractalis = Fractalis(&state);
 
     printf("State initialized: screen_w=%d, screen_h=%d, zoom_factor=%f\n", 
            state.screen_w, state.screen_h, state.zoom_factor);
@@ -124,28 +125,18 @@ void cleanup_state() {
     printf("State cleaned up\n");
 }
 
-void calculate_pixel(int x, int y) {
-    static uint8_t test = 0;
-    test += rand()%2;
-    // TODO: Implement Mandelbrot set calculation here
-    // This is a placeholder implementation
-    // state.pixelState[y][x].iteration = rand() % 256;
-    state.pixelState[y][x].iteration = test % 256;
-    state.pixelState[y][x].isComplete = true;
-
-    if (x == 0 && y == 0) {
-        printf("Calculated pixel at (%d, %d): iteration=%d\n", x, y, state.pixelState[y][x].iteration);
-    }
-}
-
 void update_display() {
     static uint8_t frame_count = 0;
     frame_count++;
 
     for(int y = 0; y < state.screen_h; ++y) {
         for(int x = 0; x < state.screen_w; ++x) {
-
-            display.set_pen(display.create_pen_hsv((float)state.pixelState[y][x].iteration / (float)MAX_ITER, 1., 1.));
+            if (state.pixelState[y][x].iteration >= MAX_ITER) {
+                display.set_pen(0, 0, 0);
+            } else {
+                const float hue = (float)state.pixelState[y][x].iteration / (float)MAX_ITER;
+                display.set_pen(display.create_pen_hsv(hue, 1., 1.));
+            }
             display.pixel(Point(x, y));
         }
     }
@@ -156,51 +147,57 @@ void update_display() {
 void handle_input() {
     static uint16_t button_pressed_duration = 0;
     static Button* last_pressed_button = nullptr;
+    bool state_changed = false;
 
+    // auto zoom
     if(button_a.raw()) {
         last_pressed_button = &button_a;
         button_pressed_duration++;
         if (button_pressed_duration > LONG_PRESS_DURATION) {
             led.set_rgb(255, 0, 255);
-            printf("Button A long press\n");
-            state.rendering = true;
             return;
         }
         led.set_rgb(0, 255, 0);
-        state.rendering = true;
-        printf("Button A pressed\n");
-    } else if(button_b.raw()) {
+    } else if(button_b.raw()) {  // left
         last_pressed_button = &button_b;
         button_pressed_duration++;
-        if (button_pressed_duration > LONG_PRESS_DURATION) {
-            led.set_rgb(0, 255, 255);
-            printf("Button B long press\n");
-            state.rendering = true;
-            return;
+        if (button_pressed_duration > LONG_PRESS_DURATION) {  // down
+            state.pan_imag -= PAN_CONSTANT / state.zoom_factor;
+            state_changed = true;
+            goto handle_input_end;
         }
-        state.pan_real -= 0.1 / state.zoom_factor;  // Pan left
-        led.set_rgb(255, 0, 0);
-        state.rendering = true;
-        printf("Button B pressed: Pan left\n");
-    } else if(button_x.raw()) {
+        state.pan_real -= PAN_CONSTANT / state.zoom_factor;
+        state_changed = true;
+    } else if(button_x.raw()) {  // right
         last_pressed_button = &button_x;
         button_pressed_duration++;
-        state.pan_real += 0.1 / state.zoom_factor;  // Pan right
-        led.set_rgb(0, 0, 255);
-        state.rendering = true;
-        printf("Button X pressed: Pan right\n");
+        if (button_pressed_duration > LONG_PRESS_DURATION) {  // up
+            state.pan_imag += PAN_CONSTANT / state.zoom_factor;
+            state_changed = true;
+            goto handle_input_end;
+        }
+        state.pan_real += PAN_CONSTANT / state.zoom_factor;
+        state_changed = true;
     } else if(button_y.raw()) {  // Zoom in and out
         last_pressed_button = &button_y;
+        if (button_pressed_duration > LONG_PRESS_DURATION) {
+            state.zoom_factor /= 1.1;
+            state_changed = true;
+            goto handle_input_end;
+        }
         button_pressed_duration++;
         state.zoom_factor *= 1.1;  // Zoom in
-        led.set_rgb(255, 255, 0);
-        state.rendering = true;
-        printf("Button Y pressed: Zoom in, new zoom_factor=%f\n", state.zoom_factor);
+        state_changed = true;
     } else {
         if (last_pressed_button != nullptr) {
-            printf("Button released\n");
+            // button released
         }
         button_pressed_duration = 0;
         last_pressed_button = nullptr;
+    }
+    handle_input_end:
+    if (state_changed) {
+        if (state.rendering < 2)
+            state.rendering++;
     }
 }

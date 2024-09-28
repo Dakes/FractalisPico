@@ -42,7 +42,8 @@ struct FractalisState {
     long double pan_real;    // Pan offset in the real axis
     long double pan_imag;    // Pan offset in the imaginary axis
 
-    bool rendering;
+    // tracking, if the screen is rendering and if a new rendering is needed
+    uint8_t rendering;
 };
 
 #endif // FRACTALIS_STATE_H
