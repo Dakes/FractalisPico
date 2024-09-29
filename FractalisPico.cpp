@@ -2,7 +2,6 @@
 #include "pico/stdio_usb.h"
 #include "pico/multicore.h"
 #include "pico/stdio.h"
-// #include "pico/mutex.h"
 #include "pico_display.hpp"
 #include "drivers/st7789/st7789.hpp"
 #include "libraries/pico_graphics/pico_graphics.hpp"
@@ -40,26 +39,22 @@ Button button_y(PicoDisplay::Y);
 FractalisState state(PicoDisplay::WIDTH, PicoDisplay::HEIGHT);
 Fractalis fractalis(&state);
 
-// Mutex for synchronizing access to shared state
-// mutex_t state_mutex;
-
 void core1_entry();
 void initialize_state();
 void cleanup_state();
 void update_display();
+void render_fractal();
 void handle_input();
 void calculate_pixel_concentric(int x, int y);
 
 int main() {
-    stdio_init_all();
     if (DEBUG) {
+        stdio_init_all();
         while (!stdio_usb_connected()) {
             sleep_ms(100);
         }
     }
     printf("Starting FractalisPico...\n");
-
-    // mutex_init(&state_mutex);
 
     st7789.set_backlight(255);
     led.set_brightness(50);
@@ -99,9 +94,6 @@ void core1_entry() {
     int max_radius = std::max(center_x, center_y);
     
     while(true) {
-        // mutex_enter_blocking(&state_mutex);
-        // mutex_exit(&state_mutex);
-
         if (state.calculating <= 0) {
             sleep_ms(UPDATE_SLEEP);
             continue;
@@ -121,14 +113,11 @@ void core1_entry() {
             }
 
             if (pixels_calculated >= UPDATE_INTERVAL) {
-                // mutex_enter_blocking(&state_mutex);
                 state.last_updated_radius = radius;
-                // mutex_exit(&state_mutex);
                 pixels_calculated = 0;
             }
         }
 
-        // mutex_enter_blocking(&state_mutex);
         if (state.iteration_limit == INITIAL_ITER) {
             state.iteration_limit = MAX_ITER;
             state.resetPixelComplete();
@@ -136,9 +125,7 @@ void core1_entry() {
         } else {
             state.rendering = 2;
             state.calculating = 0;
-            state.iteration_limit = INITIAL_ITER;
         }
-        // mutex_exit(&state_mutex);
         printf("Core1: Pixel calculation complete for iteration limit %d\n", state.iteration_limit);
     }
 }
@@ -152,12 +139,20 @@ void cleanup_state() {
 }
 
 void update_display() {
-    // mutex_enter_blocking(&state_mutex);
+    if (state.rendering <= 0)
+        return;
+    if (state.rendering == 2)
+        render_fractal();
+
+    // state.rendering--;
+}
+
+void render_fractal() {
     const int last_updated = state.last_updated_radius;
-    // mutex_exit(&state_mutex);
 
     const int center_x = state.screen_w / 2;
     const int center_y = state.screen_h / 2;
+    uint16_t pixel_rendered_counter = 0;
 
     for(int y = std::max(0, center_y - last_updated); y < std::min(state.screen_h, center_y + last_updated + 1); ++y) {
         for(int x = std::max(0, center_x - last_updated); x < std::min(state.screen_w, center_x + last_updated + 1); ++x) {
@@ -172,11 +167,14 @@ void update_display() {
                 float value = std::min(iteration_ratio / VALUE_THRESHOLD, 1.0f);
                 display.set_pen(display.create_pen_hsv(hue, saturation, value));
             }
+            pixel_rendered_counter++;
             display.pixel(Point(x, y));
         }
     }
-    
-    // Update the entire display
+    if (pixel_rendered_counter >= state.screen_w*state.screen_h) {
+        state.rendering = 1;
+        printf("setting state.rendering to 1\n");
+    }
     st7789.update(&display);
 }
 
@@ -245,12 +243,10 @@ void handle_input() {
     }
 
     if (state_changed) {
-        // mutex_enter_blocking(&state_mutex);
         state.rendering = 2;
         state.calculating = 2;
         state.last_updated_radius = 0;
         state.iteration_limit = INITIAL_ITER;
         state.resetPixelComplete();
-        // mutex_exit(&state_mutex);
     }
 }
