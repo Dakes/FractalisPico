@@ -104,14 +104,19 @@ void core1_entry() {
             sleep_ms(UPDATE_SLEEP);
             continue;
         }
+        if (state.skip_pre_render) {
+            state.calculating = 1;
+        }
 
         uint8_t current_calculation_id = state.calculation_id;
         uint16_t pixels_calculated = 0;
         for(int radius = 0; radius <= max_radius; ++radius) {
             if (state.calculation_id != current_calculation_id) {
                 printf("Calculation interrupted at radius %d, restarting\n", radius);
-                state.calculating = 2;
-                state.iteration_limit = INITIAL_ITER;
+                if (!state.skip_pre_render) {
+                    state.calculating = 2;
+                    state.iteration_limit = INITIAL_ITER;
+                }
                 break;
             }
             for(int x = -radius; x <= radius; ++x) {
@@ -132,7 +137,7 @@ void core1_entry() {
         }
 
         printf("Core1: Pixel calculation complete for iteration limit %d\n", state.iteration_limit);
-        if (state.iteration_limit == INITIAL_ITER && state.calculation_id == current_calculation_id) {
+        if (state.iteration_limit == INITIAL_ITER && state.calculation_id == current_calculation_id && !state.skip_pre_render) {
             state.iteration_limit = MAX_ITER;
             state.resetPixelComplete();
             state.calculating = 1;
@@ -241,7 +246,7 @@ void render_overlay() {
 
     // Coordinates text
     char coord_text[50];
-    snprintf(coord_text, sizeof(coord_text), "Coordinates:\n%.20lf\n%.20lf", effective_center_real, effective_center_imag);
+    snprintf(coord_text, sizeof(coord_text), "Coordinates:\n%.10lf\n%.10lf", effective_center_real, effective_center_imag);
     int32_t coord_text_width = display.measure_text(coord_text, scale, 1);
 
     // Zoom factor text
@@ -273,7 +278,7 @@ void update_led() {
 }
 
 void update_iter_limit() {
-    if (state.zoom_factor >= 5000000) {
+    if (state.zoom_factor >= 4000000) {
         state.skip_pre_render = true;
     } else if (state.zoom_factor >= 1000000) {
         state.skip_pre_render = false;
