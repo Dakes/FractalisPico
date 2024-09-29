@@ -99,8 +99,15 @@ void core1_entry() {
             continue;
         }
 
-        int pixels_calculated = 0;
+        uint8_t current_calculation_id = state.calculation_id;
+        uint16_t pixels_calculated = 0;
         for(int radius = 0; radius <= max_radius; ++radius) {
+            if (state.calculation_id != current_calculation_id) {
+                printf("Calculation interrupted at radius %d, restarting\n", radius);
+                state.calculating = 2;
+                state.iteration_limit = INITIAL_ITER;
+                break;
+            }
             for(int x = -radius; x <= radius; ++x) {
                 fractalis.calculate_pixel(center_x + x, center_y + radius, state.iteration_limit);
                 fractalis.calculate_pixel(center_x + x, center_y - radius, state.iteration_limit);
@@ -118,15 +125,15 @@ void core1_entry() {
             }
         }
 
-        if (state.iteration_limit == INITIAL_ITER) {
+        printf("Core1: Pixel calculation complete for iteration limit %d\n", state.iteration_limit);
+        if (state.iteration_limit == INITIAL_ITER && state.calculation_id == current_calculation_id) {
             state.iteration_limit = MAX_ITER;
             state.resetPixelComplete();
             state.calculating = 1;
-        } else {
+        } else if (state.calculation_id == current_calculation_id) {
             state.rendering = 2;
             state.calculating = 0;
         }
-        printf("Core1: Pixel calculation complete for iteration limit %d\n", state.iteration_limit);
     }
 }
 
@@ -245,6 +252,7 @@ void handle_input() {
     if (state_changed) {
         state.rendering = 2;
         state.calculating = 2;
+        state.calculation_id++;
         state.last_updated_radius = 0;
         state.iteration_limit = INITIAL_ITER;
         state.resetPixelComplete();

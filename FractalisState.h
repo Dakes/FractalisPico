@@ -38,10 +38,10 @@ public:
     int screen_h;
     PixelState** pixelState;
     Coordinate center;
-    double zoom_factor;
-    long double pan_real;
-    long double pan_imag;
-    int last_updated_radius;
+    volatile double zoom_factor;
+    volatile long double pan_real;
+    volatile long double pan_imag;
+    volatile int last_updated_radius;
 
    /** tracking what calculation is currently in progress. Different values have different meanings
     * 1: calculation with higher iteration limit
@@ -50,16 +50,18 @@ public:
     */
     uint8_t calculating;
 
+    volatile uint8_t calculation_id;
+
     /**
      * tracking, if the screen is rendering and if a new rendering is needed. Different values have different meanings
      * 1: Antialiasing pass
      * 2: screen rendering needed
      */
-    uint8_t rendering;
+    volatile uint8_t rendering;
 
     // dymamic iteration limit. Should be low initially and for a second render increase
-    uint8_t iteration_limit;
-    uint8_t color_iteration_limit;
+    volatile uint8_t iteration_limit;
+    volatile uint8_t color_iteration_limit;
 
 
 private:

@@ -5,7 +5,7 @@ extern const int INITIAL_ITER;
 
 FractalisState::FractalisState(int width, int height)
     : screen_w(width), screen_h(height), zoom_factor(1.0), pan_real(0), pan_imag(0),
-      last_updated_radius(0), calculating(0), rendering(0), iteration_limit(INITIAL_ITER), color_iteration_limit(INITIAL_ITER) {
+      last_updated_radius(0), calculating(0), calculation_id(0), rendering(0), iteration_limit(INITIAL_ITER), color_iteration_limit(INITIAL_ITER) {
     
     center = {-0.5, 0};
     
