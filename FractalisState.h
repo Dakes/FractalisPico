@@ -43,6 +43,8 @@ public:
     volatile long double pan_imag;
     volatile int last_updated_radius;
 
+    volatile uint8_t led_skip_counter;
+
    /** tracking what calculation is currently in progress. Different values have different meanings
     * 1: calculation with higher iteration limit
     * 2: calculation in progress

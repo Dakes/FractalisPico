@@ -19,8 +19,8 @@
 #define ZOOM_CONSTANT 0.2L
 #define UPDATE_INTERVAL 100  // Update display every 100 pixels calculated
 
-extern const int INITIAL_ITER = 50;
-extern const int MAX_ITER = 255;
+extern int INITIAL_ITER = 50;
+extern int MAX_ITER = 255;
 
 #define START_HUE 0.6222
 #define SATURATION_THRESHOLD 0.05f
@@ -43,6 +43,7 @@ void core1_entry();
 void initialize_state();
 void cleanup_state();
 void update_display();
+void update_led();
 void render_fractal();
 void handle_input();
 void calculate_pixel_concentric(int x, int y);
@@ -57,7 +58,7 @@ int main() {
     printf("Starting FractalisPico...\n");
 
     st7789.set_backlight(255);
-    led.set_brightness(50);
+    led.set_brightness(20);
     printf("Display initialized\n");
 
     initialize_state();
@@ -68,6 +69,7 @@ int main() {
 
     printf("Entering main loop on core0\n");
     while(true) {
+        update_led();
         handle_input();
         update_display();
         sleep_ms(UPDATE_SLEEP);
@@ -185,6 +187,21 @@ void render_fractal() {
     st7789.update(&display);
 }
 
+void update_led() {
+    if (state.led_skip_counter > 0) {
+        state.led_skip_counter--;
+        return;
+    }
+
+    if (state.calculating == 2) {
+        led.set_rgb(255, 100, 0);
+    } else if (state.calculating == 1) {
+        led.set_rgb(255, 200, 0);
+    } else if (state.calculating == 0 && state.rendering <= 1) {
+        led.set_rgb(0, 255, 0);
+    }
+}
+
 
 void handle_input() {
     enum class ButtonState { IDLE, PRESSED, LONG_PRESSED, HELD };
@@ -193,6 +210,7 @@ void handle_input() {
     
     Button* buttons[4] = {&button_a, &button_b, &button_x, &button_y};
     bool state_changed = false;
+    ButtonState new_state = ButtonState::IDLE;
 
     for (int i = 0; i < 4; ++i) {
         if (buttons[i]->raw()) {
@@ -204,6 +222,7 @@ void handle_input() {
             
             if (button_pressed_durations[i] > LONG_PRESS_DURATION && button_states[i] == ButtonState::PRESSED) {
                 button_states[i] = ButtonState::LONG_PRESSED;
+                new_state = ButtonState::LONG_PRESSED;
                 switch (i) {
                     case 0: // Button A
                         led.set_rgb(255, 0, 255);
@@ -226,6 +245,7 @@ void handle_input() {
             }
         } else if (button_states[i] != ButtonState::IDLE) {
             if (button_states[i] == ButtonState::PRESSED) {
+                new_state = ButtonState::PRESSED;
                 switch (i) {
                     case 0: // Button A
                         led.set_rgb(0, 255, 0);
@@ -247,6 +267,14 @@ void handle_input() {
             button_states[i] = ButtonState::IDLE;
             button_pressed_durations[i] = 0;
         }
+    }
+
+    if (new_state == ButtonState::PRESSED) {
+        led.set_rgb(0, 0, 255);
+        state.led_skip_counter = 3;
+    } else if (new_state == ButtonState::LONG_PRESSED) {
+        led.set_rgb(200, 0, 255);
+        state.led_skip_counter = 7;
     }
 
     if (state_changed) {
