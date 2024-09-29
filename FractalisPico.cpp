@@ -5,6 +5,7 @@
 #include "pico_display.hpp"
 #include "drivers/st7789/st7789.hpp"
 #include "libraries/pico_graphics/pico_graphics.hpp"
+#include "libraries/bitmap_fonts/bitmap_fonts.hpp"
 #include "rgbled.hpp"
 #include "button.hpp"
 #include "FractalisState.h"
@@ -19,7 +20,8 @@
 #define ZOOM_CONSTANT 0.2L
 #define UPDATE_INTERVAL 100  // Update display every 100 pixels calculated
 
-extern int INITIAL_ITER = 50;
+#define LOWEST_ITER 25
+extern int INITIAL_ITER = 25;
 extern int MAX_ITER = 255;
 
 #define START_HUE 0.6222
@@ -44,7 +46,9 @@ void initialize_state();
 void cleanup_state();
 void update_display();
 void update_led();
+void update_iter_limit();
 void render_fractal();
+void render_overlay();
 void handle_input();
 void calculate_pixel_concentric(int x, int y);
 
@@ -85,7 +89,7 @@ void initialize_state() {
     state.iteration_limit = INITIAL_ITER;
     // fractalis = Fractalis(&state);
 
-    printf("State initialized: screen_w=%d, screen_h=%d, zoom_factor=%f\n", 
+    printf("State initialized: screen_w=%d, screen_h=%d, zoom_factor=%Lf\n", 
            state.screen_w, state.screen_h, state.zoom_factor);
 }
 
@@ -153,7 +157,10 @@ void update_display() {
     if (state.rendering == 2)
         render_fractal();
 
-    // state.rendering--;
+    render_overlay();
+
+    // Update the display after rendering the fractal and overlay
+    st7789.update(&display);
 }
 
 void render_fractal() {
@@ -180,11 +187,74 @@ void render_fractal() {
             display.pixel(Point(x, y));
         }
     }
-    if (pixel_rendered_counter >= state.screen_w*state.screen_h) {
+    if (pixel_rendered_counter >= state.screen_w * state.screen_h) {
         state.rendering = 1;
         printf("setting state.rendering to 1\n");
     }
-    st7789.update(&display);
+    // Removed st7789.update(&display); from here
+}
+
+void render_overlay() {
+    // Set pen color to white
+    display.set_pen(255, 255, 255);
+
+    // Set font to font6 for button labels
+    // Using the bitmap fonts from your dependencies
+    display.set_font(&font6);
+
+    int scale = 1;
+
+    // Get font height
+    int font6_height = font6.height * scale;
+
+    // Button functionalities
+    const char* text_a = "A: Function";
+    const char* text_b = "B: Pan Left/Down";
+    const char* text_x = "X: Pan Right/Up";
+    const char* text_y = "Y: Zoom";
+
+    // Measure text widths
+    int32_t text_a_width = display.measure_text(text_a, scale, 1);
+    int32_t text_b_width = display.measure_text(text_b, scale, 1);
+    int32_t text_x_width = display.measure_text(text_x, scale, 1);
+    int32_t text_y_width = display.measure_text(text_y, scale, 1);
+
+    int margin = 5;
+
+    // Positions
+    display.text(text_a, Point(margin, margin), display.bounds.w, scale);
+    display.text(text_b, Point(margin, display.bounds.h - font6_height - margin), display.bounds.w, scale);
+    display.text(text_x, Point(display.bounds.w - text_b_width - margin, margin), display.bounds.w, scale);
+    display.text(text_y, Point(display.bounds.w - text_y_width - margin, display.bounds.h - font6_height - margin), display.bounds.w, scale);
+
+    // Display coordinates and zoom factor
+    // Use font8 for better readability
+    display.set_font(&font8);
+
+    int font8_height = font8.height * scale;
+
+    scale = 1;
+
+    // Compute effective center coordinates
+    long double effective_center_real = state.center.real + state.pan_real;
+    long double effective_center_imag = state.center.imag + state.pan_imag;
+
+    // Coordinates text
+    char coord_text[50];
+    snprintf(coord_text, sizeof(coord_text), "Coordinates:\n%.20lf\n%.20lf", effective_center_real, effective_center_imag);
+    int32_t coord_text_width = display.measure_text(coord_text, scale, 1);
+
+    // Zoom factor text
+    char zoom_text[30];
+    snprintf(zoom_text, sizeof(zoom_text), "Zoom: x%.0lf", state.zoom_factor);
+    int32_t zoom_text_width = display.measure_text(zoom_text, scale, 1);
+
+    // Position for coordinates and zoom factor
+    int info_y = margin*2 + margin + font8_height;
+    display.text(coord_text, Point(margin, info_y), display.bounds.w - 2 * margin, scale);
+
+    info_y += font8_height*3 + margin;
+    display.text(zoom_text, Point(margin, info_y), display.bounds.w - 2 * margin, scale);
 }
 
 void update_led() {
@@ -202,6 +272,27 @@ void update_led() {
     }
 }
 
+void update_iter_limit() {
+    if (state.zoom_factor >= 5000000) {
+        state.skip_pre_render = true;
+    } else if (state.zoom_factor >= 1000000) {
+        state.skip_pre_render = false;
+        INITIAL_ITER = 150;
+    } else if (state.zoom_factor >= 500000) {
+        INITIAL_ITER = 125;
+    } else if (state.zoom_factor >= 2000) {
+        INITIAL_ITER = 100;
+    } else if (state.zoom_factor >= 750) {
+        INITIAL_ITER = 75;
+    } else if (state.zoom_factor >= 200) {
+        INITIAL_ITER = 50;
+    } else if (state.zoom_factor >= 100) {
+        INITIAL_ITER = 30;
+    } else {
+        INITIAL_ITER = LOWEST_ITER;
+        state.skip_pre_render = false;
+    }
+}
 
 void handle_input() {
     enum class ButtonState { IDLE, PRESSED, LONG_PRESSED, HELD };
@@ -238,6 +329,7 @@ void handle_input() {
                     case 3: // Button Y
                         fractalis.zoom(-ZOOM_CONSTANT);
                         state_changed = true;
+                        update_iter_limit();
                         break;
                 }
             } else if (button_states[i] == ButtonState::LONG_PRESSED) {
@@ -261,6 +353,7 @@ void handle_input() {
                     case 3: // Button Y
                         fractalis.zoom(ZOOM_CONSTANT);
                         state_changed = true;
+                        update_iter_limit();
                         break;
                 }
             }

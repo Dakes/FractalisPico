@@ -45,6 +45,9 @@ public:
 
     volatile uint8_t led_skip_counter;
 
+    // will be set to true for deep zoom factors to disable low iteration counts
+    volatile bool skip_pre_render;
+
    /** tracking what calculation is currently in progress. Different values have different meanings
     * 1: calculation with higher iteration limit
     * 2: calculation in progress
