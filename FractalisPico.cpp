@@ -20,8 +20,8 @@
 #define ZOOM_CONSTANT 0.2L
 #define UPDATE_INTERVAL 100  // Update display every 100 pixels calculated
 
-constexpr int INITIAL_ITER = 50;
-constexpr int MAX_ITER = 255;
+extern const int INITIAL_ITER = 50;
+extern const int MAX_ITER = 255;
 
 #define START_HUE 0.6222
 #define SATURATION_THRESHOLD 0.05f
@@ -83,17 +83,6 @@ int main() {
 }
 
 void initialize_state() {
-    // state.pixelState = new PixelState*[state.screen_h];
-    // for(int i = 0; i < state.screen_h; ++i) {
-        // state.pixelState[i] = new PixelState[state.screen_w];
-    // }
-
-    // state.center = {-0.5, 0};
-    // state.zoom_factor = 1.0;
-    // state.pan_real = 0;
-    // state.pan_imag = 0;
-    // state.rendering = 1;
-    // state.last_updated_radius = 0;
     state.calculating = 2;
     state.rendering = 2;
     state.iteration_limit = INITIAL_ITER;
@@ -113,7 +102,7 @@ void core1_entry() {
         // mutex_enter_blocking(&state_mutex);
         // mutex_exit(&state_mutex);
 
-        if (state.rendering <= 0) {
+        if (state.calculating <= 0) {
             sleep_ms(UPDATE_SLEEP);
             continue;
         }
@@ -142,11 +131,12 @@ void core1_entry() {
         // mutex_enter_blocking(&state_mutex);
         if (state.iteration_limit == INITIAL_ITER) {
             state.iteration_limit = MAX_ITER;
+            state.resetPixelComplete();
             state.calculating = 1;
         } else {
-            state.rendering--;
+            state.rendering = 2;
             state.calculating = 0;
-            state.iteration_limit == INITIAL_ITER;
+            state.iteration_limit = INITIAL_ITER;
         }
         // mutex_exit(&state_mutex);
         printf("Core1: Pixel calculation complete for iteration limit %d\n", state.iteration_limit);
@@ -176,7 +166,7 @@ void update_display() {
             if (state.pixelState[y][x].iteration >= state.iteration_limit) {
                 display.set_pen(0, 0, 0);
             } else {
-                float iteration_ratio = (float)state.pixelState[y][x].iteration / (float)state.iteration_limit;
+                float iteration_ratio = (float)state.pixelState[y][x].iteration / (float)state.color_iteration_limit;
                 float hue = fmodf(START_HUE + iteration_ratio, 1.0f);
                 float saturation = std::min(iteration_ratio / SATURATION_THRESHOLD, 1.0f);
                 float value = std::min(iteration_ratio / VALUE_THRESHOLD, 1.0f);

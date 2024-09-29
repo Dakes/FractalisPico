@@ -59,6 +59,7 @@ public:
 
     // dymamic iteration limit. Should be low initially and for a second render increase
     uint8_t iteration_limit;
+    uint8_t color_iteration_limit;
 
 
 private:
