@@ -23,8 +23,8 @@ endif()
 
 # Set PIMORONI_PICO_PATH directly in CMake
 set(PIMORONI_PICO_PATH "${CMAKE_CURRENT_LIST_DIR}/pimoroni-pico" CACHE PATH "Path to the Pimoroni Pico libraries")
-set(PICO_SDK_PATH "${CMAKE_CURRENT_LIST_DIR}/pico-sdk" CACHE PATH "Path to the Pico sdk")
-# set(PICO_SDK_PATH ${USERHOME}/.pico-sdk CACHE PATH "Path to the Pico sdk")
+# set(PICO_SDK_PATH "${CMAKE_CURRENT_LIST_DIR}/pico-sdk" CACHE PATH "Path to the Pico sdk")
+set(PICO_SDK_PATH ${USERHOME}/.pico-sdk CACHE PATH "Path to the Pico sdk")
 
 # Change your executable name to something creative!
 set(NAME FractalisPico)
@@ -37,12 +37,14 @@ project(${NAME} C CXX ASM)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
 
+
 # Initialize the SDK
 pico_sdk_init()
 
 # Add your source files
 add_executable(${NAME}
     FractalisPico.cpp # Your main source file
+    FractalisState.cpp
     fractalis.cpp
 )
 

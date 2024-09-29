@@ -1,7 +1,8 @@
 #include "pico/stdlib.h"
+#include "pico/stdio_usb.h"
 #include "pico/multicore.h"
 #include "pico/stdio.h"
-#include "pico/mutex.h"
+// #include "pico/mutex.h"
 #include "pico_display.hpp"
 #include "drivers/st7789/st7789.hpp"
 #include "libraries/pico_graphics/pico_graphics.hpp"
@@ -12,13 +13,15 @@
 #include <chrono>
 #include <cmath>
 
+#define DEBUG true
 #define UPDATE_SLEEP 16
 #define LONG_PRESS_DURATION 100/UPDATE_SLEEP
-#define PAN_CONSTANT 0.2
-#define ZOOM_CONSTANT 0.2
+#define PAN_CONSTANT 0.2L
+#define ZOOM_CONSTANT 0.2L
 #define UPDATE_INTERVAL 100  // Update display every 100 pixels calculated
 
-constexpr int MAX_ITER = 50;
+constexpr int INITIAL_ITER = 50;
+constexpr int MAX_ITER = 255;
 
 #define START_HUE 0.6222
 #define SATURATION_THRESHOLD 0.05f
@@ -34,11 +37,11 @@ Button button_b(PicoDisplay::B);
 Button button_x(PicoDisplay::X);
 Button button_y(PicoDisplay::Y);
 
-FractalisState state;
+FractalisState state(PicoDisplay::WIDTH, PicoDisplay::HEIGHT);
 Fractalis fractalis(&state);
 
 // Mutex for synchronizing access to shared state
-mutex_t state_mutex;
+// mutex_t state_mutex;
 
 void core1_entry();
 void initialize_state();
@@ -49,9 +52,14 @@ void calculate_pixel_concentric(int x, int y);
 
 int main() {
     stdio_init_all();
+    if (DEBUG) {
+        while (!stdio_usb_connected()) {
+            sleep_ms(100);
+        }
+    }
     printf("Starting FractalisPico...\n");
 
-    mutex_init(&state_mutex);
+    // mutex_init(&state_mutex);
 
     st7789.set_backlight(255);
     led.set_brightness(50);
@@ -74,68 +82,75 @@ int main() {
     return 0;
 }
 
+void initialize_state() {
+    // state.pixelState = new PixelState*[state.screen_h];
+    // for(int i = 0; i < state.screen_h; ++i) {
+        // state.pixelState[i] = new PixelState[state.screen_w];
+    // }
+
+    // state.center = {-0.5, 0};
+    // state.zoom_factor = 1.0;
+    // state.pan_real = 0;
+    // state.pan_imag = 0;
+    // state.rendering = 1;
+    // state.last_updated_radius = 0;
+    state.calculating = 2;
+    state.rendering = 2;
+    state.iteration_limit = INITIAL_ITER;
+    // fractalis = Fractalis(&state);
+
+    printf("State initialized: screen_w=%d, screen_h=%d, zoom_factor=%f\n", 
+           state.screen_w, state.screen_h, state.zoom_factor);
+}
+
 void core1_entry() {
     printf("Core1 started\n");
     int center_x = state.screen_w / 2;
     int center_y = state.screen_h / 2;
     int max_radius = std::max(center_x, center_y);
+    
     while(true) {
-        mutex_enter_blocking(&state_mutex);
-        bool should_render = state.rendering > 0;
-        mutex_exit(&state_mutex);
+        // mutex_enter_blocking(&state_mutex);
+        // mutex_exit(&state_mutex);
 
-        if (!should_render) {
-            sleep_ms(16);
+        if (state.rendering <= 0) {
+            sleep_ms(UPDATE_SLEEP);
             continue;
         }
 
         int pixels_calculated = 0;
         for(int radius = 0; radius <= max_radius; ++radius) {
             for(int x = -radius; x <= radius; ++x) {
-                fractalis.calculate_pixel(center_x + x, center_y + radius);
-                fractalis.calculate_pixel(center_x + x, center_y - radius);
+                fractalis.calculate_pixel(center_x + x, center_y + radius, state.iteration_limit);
+                fractalis.calculate_pixel(center_x + x, center_y - radius, state.iteration_limit);
                 pixels_calculated += 2;
             }
             for(int y = -radius + 1; y < radius; ++y) {
-                fractalis.calculate_pixel(center_x + radius, center_y + y);
-                fractalis.calculate_pixel(center_x - radius, center_y + y);
+                fractalis.calculate_pixel(center_x + radius, center_y + y, state.iteration_limit);
+                fractalis.calculate_pixel(center_x - radius, center_y + y, state.iteration_limit);
                 pixels_calculated += 2;
             }
 
             if (pixels_calculated >= UPDATE_INTERVAL) {
-                mutex_enter_blocking(&state_mutex);
+                // mutex_enter_blocking(&state_mutex);
                 state.last_updated_radius = radius;
-                mutex_exit(&state_mutex);
+                // mutex_exit(&state_mutex);
                 pixels_calculated = 0;
             }
         }
 
-        mutex_enter_blocking(&state_mutex);
-        state.rendering--;
-        mutex_exit(&state_mutex);
-        printf("Core1: Pixel calculation complete\n");
+        // mutex_enter_blocking(&state_mutex);
+        if (state.iteration_limit == INITIAL_ITER) {
+            state.iteration_limit = MAX_ITER;
+            state.calculating = 1;
+        } else {
+            state.rendering--;
+            state.calculating = 0;
+            state.iteration_limit == INITIAL_ITER;
+        }
+        // mutex_exit(&state_mutex);
+        printf("Core1: Pixel calculation complete for iteration limit %d\n", state.iteration_limit);
     }
-}
-
-void initialize_state() {
-    state.screen_w = PicoDisplay::WIDTH;
-    state.screen_h = PicoDisplay::HEIGHT;
-    
-    state.pixelState = new PixelState*[state.screen_h];
-    for(int i = 0; i < state.screen_h; ++i) {
-        state.pixelState[i] = new PixelState[state.screen_w];
-    }
-
-    state.center = {-0.5, 0};
-    state.zoom_factor = 1.0;
-    state.pan_real = 0;
-    state.pan_imag = 0;
-    state.rendering = 1;
-    state.last_updated_radius = 0;
-    fractalis = Fractalis(&state);
-
-    printf("State initialized: screen_w=%d, screen_h=%d, zoom_factor=%f\n", 
-           state.screen_w, state.screen_h, state.zoom_factor);
 }
 
 void cleanup_state() {
@@ -147,19 +162,21 @@ void cleanup_state() {
 }
 
 void update_display() {
-    mutex_enter_blocking(&state_mutex);
-    int last_updated = state.last_updated_radius;
-    mutex_exit(&state_mutex);
+    // mutex_enter_blocking(&state_mutex);
+    const int last_updated = state.last_updated_radius;
+    // mutex_exit(&state_mutex);
 
-    int center_x = state.screen_w / 2;
-    int center_y = state.screen_h / 2;
+    const int center_x = state.screen_w / 2;
+    const int center_y = state.screen_h / 2;
 
     for(int y = std::max(0, center_y - last_updated); y < std::min(state.screen_h, center_y + last_updated + 1); ++y) {
         for(int x = std::max(0, center_x - last_updated); x < std::min(state.screen_w, center_x + last_updated + 1); ++x) {
-            if (state.pixelState[y][x].iteration >= MAX_ITER) {
+            if (!state.pixelState[y][x].isComplete)
+                continue;
+            if (state.pixelState[y][x].iteration >= state.iteration_limit) {
                 display.set_pen(0, 0, 0);
             } else {
-                float iteration_ratio = (float)state.pixelState[y][x].iteration / (float)MAX_ITER;
+                float iteration_ratio = (float)state.pixelState[y][x].iteration / (float)state.iteration_limit;
                 float hue = fmodf(START_HUE + iteration_ratio, 1.0f);
                 float saturation = std::min(iteration_ratio / SATURATION_THRESHOLD, 1.0f);
                 float value = std::min(iteration_ratio / VALUE_THRESHOLD, 1.0f);
@@ -172,6 +189,7 @@ void update_display() {
     // Update the entire display
     st7789.update(&display);
 }
+
 
 void handle_input() {
     enum class ButtonState { IDLE, PRESSED, LONG_PRESSED, HELD };
@@ -196,15 +214,15 @@ void handle_input() {
                         led.set_rgb(255, 0, 255);
                         break;
                     case 1: // Button B
-                        state.pan_imag += PAN_CONSTANT / state.zoom_factor;
+                        fractalis.pan(0, PAN_CONSTANT);
                         state_changed = true;
                         break;
                     case 2: // Button X
-                        state.pan_imag -= PAN_CONSTANT / state.zoom_factor;
+                        fractalis.pan(0, -PAN_CONSTANT);
                         state_changed = true;
                         break;
                     case 3: // Button Y
-                        state.zoom_factor /= (1 + ZOOM_CONSTANT);
+                        fractalis.zoom(-ZOOM_CONSTANT);
                         state_changed = true;
                         break;
                 }
@@ -218,15 +236,15 @@ void handle_input() {
                         led.set_rgb(0, 255, 0);
                         break;
                     case 1: // Button B
-                        state.pan_real -= PAN_CONSTANT / state.zoom_factor;
+                        fractalis.pan(-PAN_CONSTANT, 0.L);
                         state_changed = true;
                         break;
                     case 2: // Button X
-                        state.pan_real += PAN_CONSTANT / state.zoom_factor;
+                        fractalis.pan(PAN_CONSTANT, 0.L);
                         state_changed = true;
                         break;
                     case 3: // Button Y
-                        state.zoom_factor *= (1 + ZOOM_CONSTANT);
+                        fractalis.zoom(ZOOM_CONSTANT);
                         state_changed = true;
                         break;
                 }
@@ -237,11 +255,12 @@ void handle_input() {
     }
 
     if (state_changed) {
-        mutex_enter_blocking(&state_mutex);
-        if (state.rendering < 2) {
-            state.rendering++;
-        }
-        state.last_updated_radius = 0;  // Reset the last updated row to force a full redraw
-        mutex_exit(&state_mutex);
+        // mutex_enter_blocking(&state_mutex);
+        state.rendering = 2;
+        state.calculating = 2;
+        state.last_updated_radius = 0;
+        state.iteration_limit = INITIAL_ITER;
+        state.resetPixelComplete();
+        // mutex_exit(&state_mutex);
     }
 }

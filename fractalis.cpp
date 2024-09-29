@@ -22,8 +22,11 @@ std::complex<long double> Fractalis::pixel_to_point(int x, int y) {
     return std::complex<long double>(re, im);
 }
 
-void Fractalis::calculate_pixel(int x, int y) {
-    if (x <= 0 || x > state->screen_w || y <= 0 || y > state->screen_h) {
+void Fractalis::calculate_pixel(int x, int y, int iter_limit) {
+    if (x < 0 || x >= state->screen_w || y < 0 || y >= state->screen_h) {
+        return;
+    }
+    if (state->pixelState[y][x].isComplete) {
         return;
     }
 
@@ -31,7 +34,7 @@ void Fractalis::calculate_pixel(int x, int y) {
     std::complex<long double> z = 0;
     int iteration = 0;
     
-    while (std::abs(z) <= 2 && iteration < MAX_ITER) {
+    while (std::abs(z) <= 2 && iteration < iter_limit) {
         z = f_c(c, z);
         iteration++;
     }
@@ -41,7 +44,7 @@ void Fractalis::calculate_pixel(int x, int y) {
 }
 
 void Fractalis::zoom(long double factor) {
-    state->zoom_factor *= factor;
+    state->zoom_factor *= 1.f + factor;
 }
 
 void Fractalis::pan(long double dx, long double dy) {

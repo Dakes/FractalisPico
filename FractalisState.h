@@ -24,22 +24,23 @@ struct PixelState {
     bool isComplete;       // Flag indicating if the pixel computation is complete
 };
 
-// Main state structure for the fractal zoomer
-struct FractalisState {
-    // will never change during runtime
+
+class FractalisState {
+public:
+    FractalisState(int width, int height);
+    ~FractalisState();
+
+    void resetPixelComplete(int x1, int y1, int x2, int y2);
+    void resetPixelComplete();
+
+    // Public members
     int screen_w;
     int screen_h;
-
-    // 2D array of per-pixel states; accessed as pixelState[y][x]
     PixelState** pixelState;
-
-    Coordinate center;       // Center coordinate of the current view
-    double zoom_factor;      // Zoom level; higher values mean deeper zoom
-
-    // Variables to handle panning
-    long double pan_real;    // Pan offset in the real axis
-    long double pan_imag;    // Pan offset in the imaginary axis
-
+    Coordinate center;
+    double zoom_factor;
+    long double pan_real;
+    long double pan_imag;
     int last_updated_radius;
 
    /** tracking what calculation is currently in progress. Different values have different meanings
@@ -59,6 +60,9 @@ struct FractalisState {
     // dymamic iteration limit. Should be low initially and for a second render increase
     uint8_t iteration_limit;
 
+
+private:
+    void resetPixelCompleteInternal(int x1, int y1, int x2, int y2);
 };
 
 #endif // FRACTALIS_STATE_H

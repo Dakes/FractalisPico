@@ -4,12 +4,10 @@
 #include "FractalisState.h"
 #include <complex>
 
-extern const int MAX_ITER;
-
 class Fractalis {
 public:
     Fractalis(FractalisState* state);
-    void calculate_pixel(int x, int y);
+    void calculate_pixel(int x, int y, int iter_limit);
     void zoom(long double factor);
     void pan(long double dx, long double dy);
 
