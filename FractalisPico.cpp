@@ -66,7 +66,11 @@ void calculate_pixel_concentric(int x, int y);
 int main() {
     if (DEBUG) {
         stdio_init_all();
+        uint16_t time = 0;
         while (!stdio_usb_connected()) {
+            time++;
+            if (time >= 200)
+                break;
             sleep_ms(100);
         }
     }
@@ -193,7 +197,7 @@ void render_fractal() {
             if (state.pixelState[y][x].iteration >= state.iteration_limit) {
                 display.set_pen(0, 0, 0);
             } else {
-                float iteration_ratio = (float)state.pixelState[y][x].iteration / (float)state.color_iteration_limit;
+                float iteration_ratio = std::log(1 + state.pixelState[y][x].smooth_iteration) / 2.0f;
                 float hue = fmodf(START_HUE + iteration_ratio, 1.0f);
                 float saturation = std::min(iteration_ratio / SATURATION_THRESHOLD, 1.0f);
                 float value = std::min(iteration_ratio / VALUE_THRESHOLD, 1.0f);
@@ -203,11 +207,11 @@ void render_fractal() {
             display.pixel(Point(x, y));
         }
     }
+
     if (pixel_rendered_counter >= state.screen_w * state.screen_h) {
         state.rendering = 1;
         printf("setting state.rendering to 1\n");
     }
-    // Removed st7789.update(&display); from here
 }
 
 void render_overlay() {

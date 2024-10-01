@@ -20,8 +20,9 @@ struct Coordinate {
 
 // Per-pixel data structure to track iteration counts and current z values
 struct PixelState {
-    uint8_t iteration;    // Current iteration count
-    bool isComplete;       // Flag indicating if the pixel computation is complete
+    uint8_t iteration;      // Current iteration count
+    bool isComplete;        // Flag indicating if the pixel computation is complete
+    float smooth_iteration; // Smooth iteration count for coloring
 };
 
 

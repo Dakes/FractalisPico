@@ -27,14 +27,6 @@ bool Fractalis::approximately_equal(const std::complex<long double>& a, const st
 }
 
 void Fractalis::calculate_pixel(int x, int y, int iter_limit) {
-    // For periodicity checking. Static, to save on memory allocations
-    static std::complex<long double> z = 0;
-    static std::complex<long double> z_old = 0;
-    static int period = 0;
-    period = 0;
-    z = 0;
-    z_old = 0;
-
     if (x < 0 || x >= state->screen_w || y < 0 || y >= state->screen_h) {
         return;
     }
@@ -54,6 +46,9 @@ void Fractalis::calculate_pixel(int x, int y, int iter_limit) {
 
     int iteration = 0;
 
+    std::complex<long double> z = 0;
+    std::complex<long double> z_old = 0;
+    uint8_t period = 0;
     while (std::abs(z) <= 2 && iteration < iter_limit) {
         z = f_c(c, z);
         iteration++;
@@ -61,7 +56,6 @@ void Fractalis::calculate_pixel(int x, int y, int iter_limit) {
         // Periodicity checking
         if (!skip_optimizations) {
             if (approximately_equal(z, z_old)) {
-                printf("Periodicity detected at (%d, %d)\n", x, y);
                 iteration = iter_limit;
                 break;
             }
@@ -72,6 +66,16 @@ void Fractalis::calculate_pixel(int x, int y, int iter_limit) {
                 z_old = z;
             }
         }
+    }
+
+    // Smooth coloring
+    if (iteration < iter_limit) {
+        long double log_zn = std::log(std::norm(z)) / 2.0L; // log |z|
+        long double log_N = 16.0L * std::log(2.0L); // log(2^16) = 16 * log(2)
+        long double nu = std::log(log_zn / log_N) / std::log(2.0L);
+        state->pixelState[y][x].smooth_iteration = iteration + 1.0L - nu;
+    } else {
+        state->pixelState[y][x].smooth_iteration = 1.0L;
     }
 
     state->pixelState[y][x].iteration = iteration;
