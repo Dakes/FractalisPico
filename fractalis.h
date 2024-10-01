@@ -16,6 +16,7 @@ private:
     std::complex<long double> f_c(const std::complex<long double>& c, const std::complex<long double>& z = 0);
     std::complex<long double> pixel_to_point(int x, int y);
     bool is_in_main_bulb(const std::complex<long double>& c);
+    bool approximately_equal(const std::complex<long double>& a, const std::complex<long double>& b, long double epsilon = 1e-12);
 };
 
 #endif // FRACTALIS_H

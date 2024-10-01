@@ -22,7 +22,19 @@ std::complex<long double> Fractalis::pixel_to_point(int x, int y) {
     return std::complex<long double>(re, im);
 }
 
+bool Fractalis::approximately_equal(const std::complex<long double>& a, const std::complex<long double>& b, long double epsilon) {
+    return std::abs(a - b) < epsilon;
+}
+
 void Fractalis::calculate_pixel(int x, int y, int iter_limit) {
+    // For periodicity checking. Static, to save on memory allocations
+    static std::complex<long double> z = 0;
+    static std::complex<long double> z_old = 0;
+    static int period = 0;
+    period = 0;
+    z = 0;
+    z_old = 0;
+
     if (x < 0 || x >= state->screen_w || y < 0 || y >= state->screen_h) {
         return;
     }
@@ -32,20 +44,36 @@ void Fractalis::calculate_pixel(int x, int y, int iter_limit) {
 
     std::complex<long double> c = pixel_to_point(x, y);
 
-    if (state->zoom_factor < 1e3 && is_in_main_bulb(c)) {
+    bool skip_optimizations = state->zoom_factor > 1e4;
+
+    if (!skip_optimizations && is_in_main_bulb(c)) {
         state->pixelState[y][x].iteration = iter_limit;
         state->pixelState[y][x].isComplete = true;
         return;
     }
 
-    std::complex<long double> z = 0;
     int iteration = 0;
-    
+
     while (std::abs(z) <= 2 && iteration < iter_limit) {
         z = f_c(c, z);
         iteration++;
+
+        // Periodicity checking
+        if (!skip_optimizations) {
+            if (approximately_equal(z, z_old)) {
+                printf("Periodicity detected at (%d, %d)\n", x, y);
+                iteration = iter_limit;
+                break;
+            }
+
+            period++;
+            if (period > 20) {
+                period = 0;
+                z_old = z;
+            }
+        }
     }
-    
+
     state->pixelState[y][x].iteration = iteration;
     state->pixelState[y][x].isComplete = true;
 }
