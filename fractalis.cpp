@@ -31,6 +31,13 @@ void Fractalis::calculate_pixel(int x, int y, int iter_limit) {
     }
 
     std::complex<long double> c = pixel_to_point(x, y);
+
+    if (state->zoom_factor < 1e3 && is_in_main_bulb(c)) {
+        state->pixelState[y][x].iteration = iter_limit;
+        state->pixelState[y][x].isComplete = true;
+        return;
+    }
+
     std::complex<long double> z = 0;
     int iteration = 0;
     
@@ -50,4 +57,22 @@ void Fractalis::zoom(long double factor) {
 void Fractalis::pan(long double dx, long double dy) {
     state->pan_real += dx / state->zoom_factor;
     state->pan_imag += dy / state->zoom_factor;
+}
+
+bool Fractalis::is_in_main_bulb(const std::complex<long double>& c) {
+    long double x = c.real();
+    long double y = c.imag();
+
+    // Check for main cardioid
+    long double q = (x - 0.25L) * (x - 0.25L) + y * y;
+    if (q * (q + (x - 0.25L)) <= 0.25L * y * y) {
+        return true;
+    }
+
+    // Check for period-2 bulb
+    if ((x + 1.0L) * (x + 1.0L) + y * y <= 0.0625L) {
+        return true;
+    }
+
+    return false;
 }
