@@ -13,6 +13,17 @@
 #include <chrono>
 #include <cmath>
 
+/**
+ * TODO: -
+ * 
+ * - [ ] Function button (disable UI)
+ * - [ ] Auto zoom functionality
+ * - [ ] Save current state
+ * - [ ] Anti aliasing
+ * - [ ] more visual effects (dithering?)
+ * - [ ] Higher precision floats
+ */
+
 #define DEBUG true
 #define UPDATE_SLEEP 16
 #define LONG_PRESS_DURATION 100/UPDATE_SLEEP
@@ -278,23 +289,28 @@ void update_led() {
 }
 
 void update_iter_limit() {
-    if (state.zoom_factor >= 4000000) {
+    if (state.zoom_factor >= 1e5)
+        return;
+    const long double log_zoom = std::log10(state.zoom_factor);
+    const long double min_log_zoom = 0;
+    const long double max_log_zoom = 9;
+
+    const long double normalized_zoom = (log_zoom - min_log_zoom) / (max_log_zoom - min_log_zoom);
+
+    // Apply a power function for more aggressive scaling. Bigger number, slower scaling
+    const long double power_curve = std::pow(normalized_zoom, 0.5);
+
+    // Apply sigmoid function to smooth out the extremes
+    const long double sigmoid = 1.0L / (1.0L + std::exp(-12 * (power_curve - 0.5)));
+
+    // Map sigmoid output to iteration range
+    const int min_iter = LOWEST_ITER;
+    INITIAL_ITER = min_iter + static_cast<int>((MAX_ITER - min_iter) * sigmoid);
+
+    if (INITIAL_ITER > 150) {
         state.skip_pre_render = true;
-    } else if (state.zoom_factor >= 1000000) {
-        state.skip_pre_render = false;
-        INITIAL_ITER = 150;
-    } else if (state.zoom_factor >= 500000) {
-        INITIAL_ITER = 125;
-    } else if (state.zoom_factor >= 2000) {
-        INITIAL_ITER = 100;
-    } else if (state.zoom_factor >= 750) {
-        INITIAL_ITER = 75;
-    } else if (state.zoom_factor >= 200) {
-        INITIAL_ITER = 50;
-    } else if (state.zoom_factor >= 100) {
-        INITIAL_ITER = 30;
+        INITIAL_ITER = MAX_ITER;
     } else {
-        INITIAL_ITER = LOWEST_ITER;
         state.skip_pre_render = false;
     }
 }
@@ -320,7 +336,9 @@ void handle_input() {
                 button_states[i] = ButtonState::LONG_PRESSED;
                 new_state = ButtonState::LONG_PRESSED;
                 switch (i) {
-                    case 0: // Button A
+                    case 0: // Button A: Function
+                        // TODO: auto zoom start/stop
+                        // TODO: reset to initial position
                         led.set_rgb(255, 0, 255);
                         break;
                     case 1: // Button B
