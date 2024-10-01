@@ -215,6 +215,9 @@ void render_fractal() {
 }
 
 void render_overlay() {
+    if (state.hide_ui)
+        return;
+
     // Set pen color to white
     display.set_pen(255, 255, 255);
 
@@ -341,9 +344,18 @@ void handle_input() {
                 new_state = ButtonState::LONG_PRESSED;
                 switch (i) {
                     case 0: // Button A: Function
+                        state.hide_ui = !state.hide_ui;
                         // TODO: auto zoom start/stop
                         // TODO: reset to initial position
+                        if (button_pressed_durations[i] > LONG_PRESS_DURATION*4) {
+                            printf("Longer function press");
+                            led.set_rgb(50, 100, 150);
+                        } else if (button_pressed_durations[i] > LONG_PRESS_DURATION*8 ) {
+                            led.set_rgb(150, 100, 50);
+                            printf("Very long function press");
+                        }
                         led.set_rgb(255, 0, 255);
+                        state_changed = true;
                         break;
                     case 1: // Button B
                         fractalis.pan(0, PAN_CONSTANT);
