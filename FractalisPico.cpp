@@ -328,7 +328,12 @@ void handle_input() {
     
     Button* buttons[4] = {&button_a, &button_b, &button_x, &button_y};
     bool state_changed = false;
+    bool panned = false;
     ButtonState new_state = ButtonState::IDLE;
+
+    // Calculate pixel shifts at the beginning
+    static const uint16_t PIXEL_SHIFT_X = static_cast<int>(PAN_CONSTANT * state.screen_w / 3.0);
+    static const uint16_t PIXEL_SHIFT_Y = static_cast<int>(PAN_CONSTANT * state.screen_h / 2.0);
 
     for (int i = 0; i < 4; ++i) {
         if (buttons[i]->raw()) {
@@ -349,23 +354,29 @@ void handle_input() {
                         if (button_pressed_durations[i] > LONG_PRESS_DURATION*4) {
                             printf("Longer function press");
                             led.set_rgb(50, 100, 150);
-                        } else if (button_pressed_durations[i] > LONG_PRESS_DURATION*8 ) {
+                        } else if (button_pressed_durations[i] > LONG_PRESS_DURATION * 8) {
                             led.set_rgb(150, 100, 50);
                             printf("Very long function press");
                         }
                         led.set_rgb(255, 0, 255);
+                        break;
+                    case 1: // Button B: Pan Down
+                        fractalis.pan(0, PAN_CONSTANT);
+                        state.shiftPixelState(0, -PIXEL_SHIFT_Y);
+                        state.resetPixelComplete(0, state.screen_h - PIXEL_SHIFT_Y, state.screen_w - 1, state.screen_h - 1);
+                        panned = true;
                         state_changed = true;
                         break;
-                    case 1: // Button B
-                        fractalis.pan(DoubleDouble(0), DoubleDouble(PAN_CONSTANT));
+                    case 2: // Button X: Pan Up
+                        fractalis.pan(0, -PAN_CONSTANT);
+                        state.shiftPixelState(0, PIXEL_SHIFT_Y);
+                        state.resetPixelComplete(0, 0, state.screen_w - 1, PIXEL_SHIFT_Y - 1);
+                        panned = true;
                         state_changed = true;
                         break;
-                    case 2: // Button X
-                        fractalis.pan(DoubleDouble(0), DoubleDouble(-PAN_CONSTANT));
-                        state_changed = true;
-                        break;
-                    case 3: // Button Y
+                    case 3: // Button Y: Zoom
                         fractalis.zoom(-ZOOM_CONSTANT);
+                        state.resetPixelComplete();
                         state_changed = true;
                         break;
                 }
@@ -375,21 +386,27 @@ void handle_input() {
         } else if (button_states[i] != ButtonState::IDLE) {
             if (button_states[i] == ButtonState::PRESSED) {
                 new_state = ButtonState::PRESSED;
+                state_changed = true;
                 switch (i) {
                     case 0: // Button A
                         led.set_rgb(0, 255, 0);
                         break;
-                    case 1: // Button B
-                        fractalis.pan(DoubleDouble(-PAN_CONSTANT), DoubleDouble(0));
-                        state_changed = true;
+                    case 1: // Button B: Pan Left
+                        printf("shifting by: %d pixels\n", PIXEL_SHIFT_X);
+                        fractalis.pan(-PAN_CONSTANT, 0);
+                        state.shiftPixelState(PIXEL_SHIFT_X, 0);
+                        state.resetPixelComplete(0, 0, PIXEL_SHIFT_X - 1, state.screen_h - 1);
+                        panned = true;
                         break;
-                    case 2: // Button X
-                        fractalis.pan(DoubleDouble(PAN_CONSTANT), DoubleDouble(0));
-                        state_changed = true;
+                    case 2: // Button X: Pan Right
+                        fractalis.pan(PAN_CONSTANT, 0);
+                        state.shiftPixelState(-PIXEL_SHIFT_X, 0);
+                        state.resetPixelComplete(state.screen_w - PIXEL_SHIFT_X, 0, state.screen_w - 1, state.screen_h - 1);
+                        panned = true;
                         break;
-                    case 3: // Button Y
+                    case 3: // Button Y: Zoom
                         fractalis.zoom(ZOOM_CONSTANT);
-                        state_changed = true;
+                        state.resetPixelComplete();
                         break;
                 }
             }
@@ -407,10 +424,12 @@ void handle_input() {
     }
 
     if (state_changed) {
+        if (panned)
+            state.calculating = 1;
+        else
+            state.calculating = 2;
         state.rendering = 2;
-        state.calculating = 2;
         state.calculation_id++;
         state.last_updated_radius = 0;
-        state.resetPixelComplete();
     }
 }

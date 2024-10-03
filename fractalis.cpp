@@ -141,12 +141,12 @@ void Fractalis::calculate_pixel(int x, int y, int iter_limit) {
 }
 
 void Fractalis::zoom(double factor) {
-    state->zoom_factor *= 1. + factor;
+    state->zoom_factor *= 1.L + factor;
 }
 
-void Fractalis::pan(DoubleDouble dx, DoubleDouble dy) {
-    state->pan_real += dx / state->zoom_factor;
-    state->pan_imag += dy / state->zoom_factor;
+void Fractalis::pan(double dx, double dy) {
+    state->pan_real += DoubleDouble(dx / state->zoom_factor);
+    state->pan_imag += DoubleDouble(dy / state->zoom_factor);
 }
 
 bool Fractalis::is_in_main_bulb(const std::complex<double>& c) {

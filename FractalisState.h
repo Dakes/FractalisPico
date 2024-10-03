@@ -34,6 +34,7 @@ public:
 
     void resetPixelComplete(int x1, int y1, int x2, int y2);
     void resetPixelComplete();
+    void shiftPixelState(int dx, int dy);
 
     // Public members
     int screen_w;

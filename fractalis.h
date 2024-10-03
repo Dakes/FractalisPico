@@ -12,7 +12,7 @@ public:
     Fractalis(FractalisState* state);
     void calculate_pixel(int x, int y, int iter_limit);
     void zoom(double factor);
-    void pan(DoubleDouble dx, DoubleDouble dy);
+    void pan(double dx, double dy);
 
 private:
     FractalisState* state;

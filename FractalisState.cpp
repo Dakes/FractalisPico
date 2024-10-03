@@ -49,3 +49,70 @@ void FractalisState::resetPixelCompleteInternal(int x1, int y1, int x2, int y2) 
         }
     }
 }
+
+void FractalisState::shiftPixelState(int dx, int dy) {
+    // Shift the pixel state in-place without creating a new array
+    if (dx == 0 && dy == 0) {
+        return;
+    }
+
+    // Shifting pixels horizontally (x-axis)
+    if (dx != 0) {
+        for (int y = 0; y < screen_h; ++y) {
+            if (dx > 0) {
+                // Shift to the right
+                for (int x = screen_w - 1; x >= dx; --x) {
+                    pixelState[y][x] = pixelState[y][x - dx];
+                }
+                // Mark newly exposed pixels on the left as incomplete
+                for (int x = 0; x < dx; ++x) {
+                    pixelState[y][x].isComplete = false;
+                    pixelState[y][x].iteration = 0;
+                }
+            } else {
+                // Shift to the left
+                for (int x = 0; x < screen_w + dx; ++x) {
+                    pixelState[y][x] = pixelState[y][x - dx];
+                }
+                // Mark newly exposed pixels on the right as incomplete
+                for (int x = screen_w + dx; x < screen_w; ++x) {
+                    pixelState[y][x].isComplete = false;
+                    pixelState[y][x].iteration = 0;
+                }
+            }
+        }
+    }
+
+    // Shifting pixels vertically (y-axis)
+    if (dy != 0) {
+        if (dy > 0) {
+            // Shift downwards
+            for (int y = screen_h - 1; y >= dy; --y) {
+                for (int x = 0; x < screen_w; ++x) {
+                    pixelState[y][x] = pixelState[y - dy][x];
+                }
+            }
+            // Mark newly exposed pixels at the top as incomplete
+            for (int y = 0; y < dy; ++y) {
+                for (int x = 0; x < screen_w; ++x) {
+                    pixelState[y][x].isComplete = false;
+                    pixelState[y][x].iteration = 0;
+                }
+            }
+        } else {
+            // Shift upwards
+            for (int y = 0; y < screen_h + dy; ++y) {
+                for (int x = 0; x < screen_w; ++x) {
+                    pixelState[y][x] = pixelState[y - dy][x];
+                }
+            }
+            // Mark newly exposed pixels at the bottom as incomplete
+            for (int y = screen_h + dy; y < screen_h; ++y) {
+                for (int x = 0; x < screen_w; ++x) {
+                    pixelState[y][x].isComplete = false;
+                    pixelState[y][x].iteration = 0;
+                }
+            }
+        }
+    }
+}
