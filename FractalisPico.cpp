@@ -15,6 +15,7 @@
 #include <chrono>
 #include <cmath>
 
+using namespace pimoroni;
 using namespace doubledouble;
 
 #define DEBUG true
@@ -25,14 +26,12 @@ using namespace doubledouble;
 #define UPDATE_INTERVAL 100  // Update display every 100 pixels calculated
 
 #define LOWEST_ITER 25
-int INITIAL_ITER = 25;
-int MAX_ITER = 255;
+#define MAX_ITER 10000
 
 #define START_HUE 0.6222
 #define SATURATION_THRESHOLD 0.05f
 #define VALUE_THRESHOLD 0.04f
 
-using namespace pimoroni;
 
 ST7789 st7789(PicoDisplay::WIDTH, PicoDisplay::HEIGHT, ROTATE_0, false, get_spi_pins(BG_SPI_FRONT));
 PicoGraphics_PenRGB332 display(st7789.width, st7789.height, nullptr);
@@ -94,13 +93,9 @@ int main() {
 void initialize_state() {
     state.calculating = 2;
     state.rendering = 2;
-    state.iteration_limit = INITIAL_ITER;
-    state.zoom_factor = DoubleDouble(1.0);
-    state.pan_real = DoubleDouble(0.0);
-    state.pan_imag = DoubleDouble(0.0);
 
-    printf("State initialized: screen_w=%d, screen_h=%d, zoom_factor=%.15f\n", 
-           state.screen_w, state.screen_h, state.zoom_factor.upper + state.zoom_factor.lower);
+    printf("State initialized: screen_w=%d, screen_h=%d, zoom_factor=%f\n", 
+           state.screen_w, state.screen_h, state.zoom_factor);
 }
 
 void core1_entry() {
@@ -114,9 +109,13 @@ void core1_entry() {
             sleep_ms(UPDATE_SLEEP);
             continue;
         }
+
+        update_iter_limit();
+
         if (state.skip_pre_render) {
             state.calculating = 1;
         }
+
 
         uint8_t current_calculation_id = state.calculation_id;
         uint16_t pixels_calculated = 0;
@@ -125,7 +124,6 @@ void core1_entry() {
                 printf("Calculation interrupted at radius %d, restarting\n", radius);
                 if (!state.skip_pre_render) {
                     state.calculating = 2;
-                    state.iteration_limit = INITIAL_ITER;
                 }
                 break;
             }
@@ -146,12 +144,12 @@ void core1_entry() {
             }
         }
 
-        printf("Core1: Pixel calculation complete for iteration limit %d\n", state.iteration_limit);
-        if (state.iteration_limit == INITIAL_ITER && state.calculation_id == current_calculation_id && !state.skip_pre_render) {
-            state.iteration_limit = MAX_ITER;
+        printf("Core1: Pixel calculation complete for iteration limit: %d. Pre-render: %d\n", state.iteration_limit, !state.skip_pre_render);
+        if (state.calculation_id == current_calculation_id && !state.skip_pre_render && state.calculating >= 2) {
             state.resetPixelComplete();
+            state.rendering = 2;
             state.calculating = 1;
-        } else if (state.calculation_id == current_calculation_id) {
+        } else if (state.calculation_id == current_calculation_id && state.calculating == 1) {
             state.rendering = 2;
             state.calculating = 0;
         }
@@ -223,7 +221,7 @@ void render_overlay() {
     int scale = 1;
 
     // Get font height
-    int font6_height = font6.height * scale;
+    int font_height = font6.height * scale;
 
     // Button functionalities
     const char* text_a = "Function";
@@ -241,9 +239,9 @@ void render_overlay() {
 
     // Positions
     display.text(text_a, Point(margin, margin), display.bounds.w, scale);
-    display.text(text_b, Point(margin, display.bounds.h - font6_height - margin), display.bounds.w, scale);
+    display.text(text_b, Point(margin, display.bounds.h - font_height - margin), display.bounds.w, scale);
     display.text(text_x, Point(display.bounds.w - text_b_width - margin, margin), display.bounds.w, scale);
-    display.text(text_y, Point(display.bounds.w - text_y_width - margin, display.bounds.h - font6_height - margin), display.bounds.w, scale);
+    display.text(text_y, Point(display.bounds.w - text_y_width - margin, display.bounds.h - font_height - margin), display.bounds.w, scale);
 
     // Display coordinates and zoom factor
     // Use font8 for better readability
@@ -266,7 +264,10 @@ void render_overlay() {
 
     // Zoom factor text
     char zoom_text[30];
-    snprintf(zoom_text, sizeof(zoom_text), "Zoom: x%.2f", state.zoom_factor.upper + state.zoom_factor.lower);
+    if (state.zoom_factor < 1e3)
+        snprintf(zoom_text, sizeof(zoom_text), "Zoom: x%.2f", state.zoom_factor);
+    else
+        snprintf(zoom_text, sizeof(zoom_text), "Zoom: x%.1e", state.zoom_factor);
     int32_t zoom_text_width = display.measure_text(zoom_text, scale, 1);
 
     // Position for coordinates and zoom factor
@@ -284,43 +285,40 @@ void update_led() {
     }
 
     if (state.calculating == 2) {
-        led.set_rgb(255, 25, 0);
+        led.set_rgb(255, 10, 0);
     } else if (state.calculating == 1) {
-        led.set_rgb(255, 200, 0);
+        led.set_rgb(255, 150, 0);
     } else if (state.calculating == 0 && state.rendering <= 1) {
         led.set_rgb(0, 255, 0);
     }
 }
 
 void update_iter_limit() {
-    if (state.zoom_factor >= DoubleDouble(1e8)) {
+    if (state.zoom_factor > 1e6)
         state.skip_pre_render = true;
-        INITIAL_ITER = MAX_ITER;
-        return;
-    }
-    const DoubleDouble log_zoom = state.zoom_factor.log() / dd_ln2 / DoubleDouble(3.321928094887362); // log10(2)
-    const DoubleDouble min_log_zoom(0);
-    const DoubleDouble max_log_zoom(9);
-
-    const DoubleDouble normalized_zoom = (log_zoom - min_log_zoom) / (max_log_zoom - min_log_zoom);
-
-    // Apply a power function for more aggressive scaling. Bigger number, slower scaling
-    const DoubleDouble power_curve = normalized_zoom.powi(2);
-
-    // Apply sigmoid function to smooth out the extremes
-    const DoubleDouble sigmoid = DoubleDouble(1) / (DoubleDouble(1) + (-DoubleDouble(12) * (power_curve - DoubleDouble(0.5))).exp());
-
-    // Map sigmoid output to iteration range
-    const int min_iter = LOWEST_ITER;
-    INITIAL_ITER = min_iter + static_cast<int>((MAX_ITER - min_iter) * sigmoid.upper);
-    printf("new initial iter: %d\n", INITIAL_ITER);
-
-    if (INITIAL_ITER > 150) {
-        state.skip_pre_render = true;
-        INITIAL_ITER = MAX_ITER;
-    } else {
+    else
         state.skip_pre_render = false;
+
+    if (state.calculating == 0)
+        return;
+    double scale = state.screen_w / (3.0 / state.zoom_factor);
+    int max_iter = static_cast<int>(50 * std::pow(std::log10(scale), 1.25));
+    if (max_iter > MAX_ITER) {
+        max_iter = MAX_ITER;
     }
+
+    if (state.calculating == 1 || state.skip_pre_render) {
+        state.iteration_limit = max_iter;
+    } else if (state.calculating == 2 && !state.skip_pre_render) {
+        int divider = 6;
+        if (state.zoom_factor > 1e4)
+            divider -= 1;
+        if (state.zoom_factor > 1e5)
+            divider -= 1;
+            
+        state.iteration_limit = max_iter / divider;
+    }
+    printf("New iteration limit: %d\n", state.iteration_limit);
 }
 
 void handle_input() {
@@ -367,9 +365,8 @@ void handle_input() {
                         state_changed = true;
                         break;
                     case 3: // Button Y
-                        fractalis.zoom(DoubleDouble(-ZOOM_CONSTANT));
+                        fractalis.zoom(-ZOOM_CONSTANT);
                         state_changed = true;
-                        update_iter_limit();
                         break;
                 }
             } else if (button_states[i] == ButtonState::LONG_PRESSED) {
@@ -391,9 +388,8 @@ void handle_input() {
                         state_changed = true;
                         break;
                     case 3: // Button Y
-                        fractalis.zoom(DoubleDouble(ZOOM_CONSTANT));
+                        fractalis.zoom(ZOOM_CONSTANT);
                         state_changed = true;
-                        update_iter_limit();
                         break;
                 }
             }
@@ -415,7 +411,6 @@ void handle_input() {
         state.calculating = 2;
         state.calculation_id++;
         state.last_updated_radius = 0;
-        state.iteration_limit = INITIAL_ITER;
         state.resetPixelComplete();
     }
 }

@@ -1,8 +1,6 @@
 #include "fractalis.h"
 #include <cmath>
 
-extern const int MAX_ITER;
-
 Fractalis::Fractalis(FractalisState* state) : state(state) {}
 
 std::complex<DoubleDouble> Fractalis::f_c(const std::complex<DoubleDouble>& c, const std::complex<DoubleDouble>& z) {
@@ -13,8 +11,8 @@ std::complex<double> Fractalis::pixel_to_point_double(int x, int y) {
     double x_percent = static_cast<double>(x) / state->screen_w;
     double y_percent = static_cast<double>(y) / state->screen_h;
     
-    double x_range = 3.0 / state->zoom_factor.upper;
-    double y_range = 2.0 / state->zoom_factor.upper;
+    double x_range = 3.0 / state->zoom_factor;
+    double y_range = 2.0 / state->zoom_factor;
     
     double re = state->center.real.upper + (x_percent - 0.5) * x_range + state->pan_real.upper;
     double im = state->center.imag.upper + (y_percent - 0.5) * y_range + state->pan_imag.upper;
@@ -27,8 +25,8 @@ std::complex<DoubleDouble> Fractalis::pixel_to_point_dd(int x, int y) {
     DoubleDouble x_percent = DoubleDouble(x) / DoubleDouble(state->screen_w);
     DoubleDouble y_percent = DoubleDouble(y) / DoubleDouble(state->screen_h);
     
-    DoubleDouble x_range = DoubleDouble(3.0) / state->zoom_factor;
-    DoubleDouble y_range = DoubleDouble(2.0) / state->zoom_factor;
+    DoubleDouble x_range = DoubleDouble(3.0) / DoubleDouble(state->zoom_factor);
+    DoubleDouble y_range = DoubleDouble(2.0) / DoubleDouble(state->zoom_factor);
     
     DoubleDouble re = state->center.real + (x_percent - DoubleDouble(0.5)) * x_range + state->pan_real;
     DoubleDouble im = state->center.imag + (y_percent - DoubleDouble(0.5)) * y_range + state->pan_imag;
@@ -115,7 +113,7 @@ void Fractalis::calculate_pixel_dd(int x, int y, int iter_limit) {
     int iteration = 0;
     std::complex<DoubleDouble> z(0, 0);
 
-    while ((z.real() * z.real() + z.imag() * z.imag()).sqrt() <= DoubleDouble(2) && iteration < iter_limit) {
+    while ((z.real() * z.real() + z.imag() * z.imag()).sqrt() <= 2 && iteration < iter_limit) {
         z = f_c(c, z);
         iteration++;
     }
@@ -142,8 +140,8 @@ void Fractalis::calculate_pixel(int x, int y, int iter_limit) {
     }
 }
 
-void Fractalis::zoom(DoubleDouble factor) {
-    state->zoom_factor *= DoubleDouble(1) + factor;
+void Fractalis::zoom(double factor) {
+    state->zoom_factor *= 1. + factor;
 }
 
 void Fractalis::pan(DoubleDouble dx, DoubleDouble dy) {

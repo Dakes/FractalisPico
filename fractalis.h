@@ -11,7 +11,7 @@ class Fractalis {
 public:
     Fractalis(FractalisState* state);
     void calculate_pixel(int x, int y, int iter_limit);
-    void zoom(DoubleDouble factor);
+    void zoom(double factor);
     void pan(DoubleDouble dx, DoubleDouble dy);
 
 private:
