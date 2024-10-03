@@ -10,19 +10,12 @@
 #include "button.hpp"
 #include "FractalisState.h"
 #include "fractalis.h"
+#include "globals.h"
+#include "doubledouble.h"
 #include <chrono>
 #include <cmath>
 
-/**
- * TODO: -
- * 
- * - [ ] Function button (disable UI)
- * - [ ] Auto zoom functionality
- * - [ ] Save current state
- * - [ ] Anti aliasing
- * - [ ] more visual effects (dithering?)
- * - [ ] Higher precision floats
- */
+using namespace doubledouble;
 
 #define DEBUG true
 #define UPDATE_SLEEP 16
@@ -32,8 +25,8 @@
 #define UPDATE_INTERVAL 100  // Update display every 100 pixels calculated
 
 #define LOWEST_ITER 25
-extern int INITIAL_ITER = 25;
-extern int MAX_ITER = 255;
+int INITIAL_ITER = 25;
+int MAX_ITER = 255;
 
 #define START_HUE 0.6222
 #define SATURATION_THRESHOLD 0.05f
@@ -102,10 +95,12 @@ void initialize_state() {
     state.calculating = 2;
     state.rendering = 2;
     state.iteration_limit = INITIAL_ITER;
-    // fractalis = Fractalis(&state);
+    state.zoom_factor = DoubleDouble(1.0);
+    state.pan_real = DoubleDouble(0.0);
+    state.pan_imag = DoubleDouble(0.0);
 
-    printf("State initialized: screen_w=%d, screen_h=%d, zoom_factor=%Lf\n", 
-           state.screen_w, state.screen_h, state.zoom_factor);
+    printf("State initialized: screen_w=%d, screen_h=%d, zoom_factor=%.15f\n", 
+           state.screen_w, state.screen_h, state.zoom_factor.upper + state.zoom_factor.lower);
 }
 
 void core1_entry() {
@@ -231,10 +226,10 @@ void render_overlay() {
     int font6_height = font6.height * scale;
 
     // Button functionalities
-    const char* text_a = "A: Function";
-    const char* text_b = "B: Pan Left/Down";
-    const char* text_x = "X: Pan Right/Up";
-    const char* text_y = "Y: Zoom";
+    const char* text_a = "Function";
+    const char* text_b = "Pan Left/Down";
+    const char* text_x = "Pan Right/Up";
+    const char* text_y = "Zoom";
 
     // Measure text widths
     int32_t text_a_width = display.measure_text(text_a, scale, 1);
@@ -259,17 +254,19 @@ void render_overlay() {
     scale = 1;
 
     // Compute effective center coordinates
-    long double effective_center_real = state.center.real + state.pan_real;
-    long double effective_center_imag = state.center.imag + state.pan_imag;
+    DoubleDouble effective_center_real = state.center.real + state.pan_real;
+    DoubleDouble effective_center_imag = state.center.imag + state.pan_imag;
 
     // Coordinates text
-    char coord_text[50];
-    snprintf(coord_text, sizeof(coord_text), "Coordinates:\n%.10lf\n%.10lf", effective_center_real, effective_center_imag);
+    char coord_text[100];
+    snprintf(coord_text, sizeof(coord_text), "Coordinates:\n%.10f\n%.10f", 
+             effective_center_real.upper + effective_center_real.lower,
+             effective_center_imag.upper + effective_center_imag.lower);
     int32_t coord_text_width = display.measure_text(coord_text, scale, 1);
 
     // Zoom factor text
     char zoom_text[30];
-    snprintf(zoom_text, sizeof(zoom_text), "Zoom: x%.0lf", state.zoom_factor);
+    snprintf(zoom_text, sizeof(zoom_text), "Zoom: x%.2f", state.zoom_factor.upper + state.zoom_factor.lower);
     int32_t zoom_text_width = display.measure_text(zoom_text, scale, 1);
 
     // Position for coordinates and zoom factor
@@ -287,7 +284,7 @@ void update_led() {
     }
 
     if (state.calculating == 2) {
-        led.set_rgb(255, 100, 0);
+        led.set_rgb(255, 25, 0);
     } else if (state.calculating == 1) {
         led.set_rgb(255, 200, 0);
     } else if (state.calculating == 0 && state.rendering <= 1) {
@@ -296,23 +293,27 @@ void update_led() {
 }
 
 void update_iter_limit() {
-    if (state.zoom_factor >= 1e5)
+    if (state.zoom_factor >= DoubleDouble(1e8)) {
+        state.skip_pre_render = true;
+        INITIAL_ITER = MAX_ITER;
         return;
-    const long double log_zoom = std::log10(state.zoom_factor);
-    const long double min_log_zoom = 0;
-    const long double max_log_zoom = 9;
+    }
+    const DoubleDouble log_zoom = state.zoom_factor.log() / dd_ln2 / DoubleDouble(3.321928094887362); // log10(2)
+    const DoubleDouble min_log_zoom(0);
+    const DoubleDouble max_log_zoom(9);
 
-    const long double normalized_zoom = (log_zoom - min_log_zoom) / (max_log_zoom - min_log_zoom);
+    const DoubleDouble normalized_zoom = (log_zoom - min_log_zoom) / (max_log_zoom - min_log_zoom);
 
     // Apply a power function for more aggressive scaling. Bigger number, slower scaling
-    const long double power_curve = std::pow(normalized_zoom, 0.5);
+    const DoubleDouble power_curve = normalized_zoom.powi(2);
 
     // Apply sigmoid function to smooth out the extremes
-    const long double sigmoid = 1.0L / (1.0L + std::exp(-12 * (power_curve - 0.5)));
+    const DoubleDouble sigmoid = DoubleDouble(1) / (DoubleDouble(1) + (-DoubleDouble(12) * (power_curve - DoubleDouble(0.5))).exp());
 
     // Map sigmoid output to iteration range
     const int min_iter = LOWEST_ITER;
-    INITIAL_ITER = min_iter + static_cast<int>((MAX_ITER - min_iter) * sigmoid);
+    INITIAL_ITER = min_iter + static_cast<int>((MAX_ITER - min_iter) * sigmoid.upper);
+    printf("new initial iter: %d\n", INITIAL_ITER);
 
     if (INITIAL_ITER > 150) {
         state.skip_pre_render = true;
@@ -358,15 +359,15 @@ void handle_input() {
                         state_changed = true;
                         break;
                     case 1: // Button B
-                        fractalis.pan(0, PAN_CONSTANT);
+                        fractalis.pan(DoubleDouble(0), DoubleDouble(PAN_CONSTANT));
                         state_changed = true;
                         break;
                     case 2: // Button X
-                        fractalis.pan(0, -PAN_CONSTANT);
+                        fractalis.pan(DoubleDouble(0), DoubleDouble(-PAN_CONSTANT));
                         state_changed = true;
                         break;
                     case 3: // Button Y
-                        fractalis.zoom(-ZOOM_CONSTANT);
+                        fractalis.zoom(DoubleDouble(-ZOOM_CONSTANT));
                         state_changed = true;
                         update_iter_limit();
                         break;
@@ -382,15 +383,15 @@ void handle_input() {
                         led.set_rgb(0, 255, 0);
                         break;
                     case 1: // Button B
-                        fractalis.pan(-PAN_CONSTANT, 0.L);
+                        fractalis.pan(DoubleDouble(-PAN_CONSTANT), DoubleDouble(0));
                         state_changed = true;
                         break;
                     case 2: // Button X
-                        fractalis.pan(PAN_CONSTANT, 0.L);
+                        fractalis.pan(DoubleDouble(PAN_CONSTANT), DoubleDouble(0));
                         state_changed = true;
                         break;
                     case 3: // Button Y
-                        fractalis.zoom(ZOOM_CONSTANT);
+                        fractalis.zoom(DoubleDouble(ZOOM_CONSTANT));
                         state_changed = true;
                         update_iter_limit();
                         break;

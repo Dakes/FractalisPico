@@ -1,8 +1,6 @@
 #include "FractalisState.h"
+#include "globals.h"
 #include <algorithm>
-
-extern const int INITIAL_ITER;
-extern const int MAX_ITER;
 
 FractalisState::FractalisState(int width, int height)
     : screen_w(width), screen_h(height), zoom_factor(1.0), pan_real(0), pan_imag(0), led_skip_counter(0), skip_pre_render(false), hide_ui(false),

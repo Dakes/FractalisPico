@@ -2,7 +2,9 @@
 #define FRACTALIS_STATE_H
 
 #include <cstdint>
+#include "doubledouble.h"
 
+using namespace doubledouble;
 
 enum PAN_DIRECTION {
     PAN_NONE = 0,
@@ -14,8 +16,8 @@ enum PAN_DIRECTION {
 
 // Real and imaginary coordinates in the Mandelbrot fractal
 struct Coordinate {
-    long double real;
-    long double imag;
+    DoubleDouble real;
+    DoubleDouble imag;
 };
 
 // Per-pixel data structure to track iteration counts and current z values
@@ -24,7 +26,6 @@ struct PixelState {
     bool isComplete;        // Flag indicating if the pixel computation is complete
     float smooth_iteration; // Smooth iteration count for coloring
 };
-
 
 class FractalisState {
 public:
@@ -39,9 +40,9 @@ public:
     int screen_h;
     PixelState** pixelState;
     Coordinate center;
-    volatile double zoom_factor;
-    volatile long double pan_real;
-    volatile long double pan_imag;
+    DoubleDouble zoom_factor;
+    DoubleDouble pan_real;
+    DoubleDouble pan_imag;
     volatile int last_updated_radius;
 
     volatile uint8_t led_skip_counter;
@@ -50,26 +51,11 @@ public:
     volatile bool skip_pre_render;
     volatile bool hide_ui;
 
-   /** tracking what calculation is currently in progress. Different values have different meanings
-    * 1: calculation with higher iteration limit
-    * 2: calculation in progress
-    * 3: queued calculation
-    */
     uint8_t calculating;
-
     volatile uint8_t calculation_id;
-
-    /**
-     * tracking, if the screen is rendering and if a new rendering is needed. Different values have different meanings
-     * 1: Antialiasing pass
-     * 2: screen rendering needed
-     */
     volatile uint8_t rendering;
-
-    // dymamic iteration limit. Should be low initially and for a second render increase
     volatile uint8_t iteration_limit;
     volatile uint8_t color_iteration_limit;
-
 
 private:
     void resetPixelCompleteInternal(int x1, int y1, int x2, int y2);

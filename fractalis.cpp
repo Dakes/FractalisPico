@@ -5,28 +5,48 @@ extern const int MAX_ITER;
 
 Fractalis::Fractalis(FractalisState* state) : state(state) {}
 
-std::complex<long double> Fractalis::f_c(const std::complex<long double>& c, const std::complex<long double>& z) {
+std::complex<DoubleDouble> Fractalis::f_c(const std::complex<DoubleDouble>& c, const std::complex<DoubleDouble>& z) {
     return z * z + c;
 }
 
-std::complex<long double> Fractalis::pixel_to_point(int x, int y) {
-    long double x_percent = static_cast<long double>(x) / state->screen_w;
-    long double y_percent = static_cast<long double>(y) / state->screen_h;
+std::complex<double> Fractalis::pixel_to_point_double(int x, int y) {
+    double x_percent = static_cast<double>(x) / state->screen_w;
+    double y_percent = static_cast<double>(y) / state->screen_h;
     
-    long double x_range = 3.0L / state->zoom_factor;
-    long double y_range = 2.0L / state->zoom_factor;
+    double x_range = 3.0 / state->zoom_factor.upper;
+    double y_range = 2.0 / state->zoom_factor.upper;
     
-    long double re = state->center.real + (x_percent - 0.5L) * x_range + state->pan_real;
-    long double im = state->center.imag + (y_percent - 0.5L) * y_range + state->pan_imag;
+    double re = state->center.real.upper + (x_percent - 0.5) * x_range + state->pan_real.upper;
+    double im = state->center.imag.upper + (y_percent - 0.5) * y_range + state->pan_imag.upper;
     
-    return std::complex<long double>(re, im);
+    return std::complex<double>(re, im);
 }
 
-bool Fractalis::approximately_equal(const std::complex<long double>& a, const std::complex<long double>& b, long double epsilon) {
+
+std::complex<DoubleDouble> Fractalis::pixel_to_point_dd(int x, int y) {
+    DoubleDouble x_percent = DoubleDouble(x) / DoubleDouble(state->screen_w);
+    DoubleDouble y_percent = DoubleDouble(y) / DoubleDouble(state->screen_h);
+    
+    DoubleDouble x_range = DoubleDouble(3.0) / state->zoom_factor;
+    DoubleDouble y_range = DoubleDouble(2.0) / state->zoom_factor;
+    
+    DoubleDouble re = state->center.real + (x_percent - DoubleDouble(0.5)) * x_range + state->pan_real;
+    DoubleDouble im = state->center.imag + (y_percent - DoubleDouble(0.5)) * y_range + state->pan_imag;
+    
+    return std::complex<DoubleDouble>(re, im);
+}
+
+bool Fractalis::needsHighPrecision() {
+    // return state->zoom_factor > DoubleDouble(1e14);
+    return state->zoom_factor > 1e14;
+}
+
+bool Fractalis::approximately_equal(const std::complex<double>& a, const std::complex<double>& b, double epsilon) {
     return std::abs(a - b) < epsilon;
 }
 
-void Fractalis::calculate_pixel(int x, int y, int iter_limit) {
+// Double precision implementation
+void Fractalis::calculate_pixel_double(int x, int y, int iter_limit) {
     if (x < 0 || x >= state->screen_w || y < 0 || y >= state->screen_h) {
         return;
     }
@@ -34,9 +54,9 @@ void Fractalis::calculate_pixel(int x, int y, int iter_limit) {
         return;
     }
 
-    std::complex<long double> c = pixel_to_point(x, y);
+    std::complex<double> c = pixel_to_point_double(x, y);
 
-    bool skip_optimizations = state->zoom_factor > 1e4;
+    bool skip_optimizations = state->zoom_factor > 1e7;
 
     if (!skip_optimizations && is_in_main_bulb(c)) {
         state->pixelState[y][x].iteration = iter_limit;
@@ -45,12 +65,12 @@ void Fractalis::calculate_pixel(int x, int y, int iter_limit) {
     }
 
     int iteration = 0;
-
-    std::complex<long double> z = 0;
-    std::complex<long double> z_old = 0;
+    std::complex<double> z(0, 0);
+    std::complex<double> z_old(0, 0);
     uint8_t period = 0;
-    while (std::abs(z) <= 2 && iteration < iter_limit) {
-        z = f_c(c, z);
+
+    while (std::abs(z) <= 2.0 && iteration < iter_limit) {
+        z = z * z + c;
         iteration++;
 
         // Periodicity checking
@@ -70,39 +90,79 @@ void Fractalis::calculate_pixel(int x, int y, int iter_limit) {
 
     // Smooth coloring
     if (iteration < iter_limit) {
-        long double log_zn = std::log(std::norm(z)) / 2.0L; // log |z|
-        long double log_N = 16.0L * std::log(2.0L); // log(2^16) = 16 * log(2)
-        long double nu = std::log(log_zn / log_N) / std::log(2.0L);
-        state->pixelState[y][x].smooth_iteration = iteration + 1.0L - nu;
+        double log_zn = std::log(std::abs(z)) / 2;
+        double nu = std::log(log_zn / std::log(2)) / std::log(2);
+        state->pixelState[y][x].smooth_iteration = iteration + 1 - nu;
     } else {
-        state->pixelState[y][x].smooth_iteration = 1.0L;
+        state->pixelState[y][x].smooth_iteration = 1.0f;
     }
 
     state->pixelState[y][x].iteration = iteration;
     state->pixelState[y][x].isComplete = true;
 }
 
-void Fractalis::zoom(long double factor) {
-    state->zoom_factor *= 1.f + factor;
+
+void Fractalis::calculate_pixel_dd(int x, int y, int iter_limit) {
+    if (x < 0 || x >= state->screen_w || y < 0 || y >= state->screen_h) {
+        return;
+    }
+    if (state->pixelState[y][x].isComplete) {
+        return;
+    }
+
+    std::complex<DoubleDouble> c = pixel_to_point_dd(x, y);
+
+    int iteration = 0;
+    std::complex<DoubleDouble> z(0, 0);
+
+    while ((z.real() * z.real() + z.imag() * z.imag()).sqrt() <= DoubleDouble(2) && iteration < iter_limit) {
+        z = f_c(c, z);
+        iteration++;
+    }
+
+    // Smooth coloring
+    if (iteration < iter_limit) {
+        DoubleDouble log_zn = (z.real() * z.real() + z.imag() * z.imag()).log() / DoubleDouble(2);
+        DoubleDouble log_N = DoubleDouble(16) * dd_ln2;
+        DoubleDouble nu = (log_zn / log_N).log() / dd_ln2;
+        state->pixelState[y][x].smooth_iteration = (iteration + DoubleDouble(1) - nu).upper;
+    } else {
+        state->pixelState[y][x].smooth_iteration = 1.0f;
+    }
+
+    state->pixelState[y][x].iteration = iteration;
+    state->pixelState[y][x].isComplete = true;
 }
 
-void Fractalis::pan(long double dx, long double dy) {
+void Fractalis::calculate_pixel(int x, int y, int iter_limit) {
+    if (needsHighPrecision()) {
+        calculate_pixel_dd(x, y, iter_limit);
+    } else {
+        calculate_pixel_double(x, y, iter_limit);
+    }
+}
+
+void Fractalis::zoom(DoubleDouble factor) {
+    state->zoom_factor *= DoubleDouble(1) + factor;
+}
+
+void Fractalis::pan(DoubleDouble dx, DoubleDouble dy) {
     state->pan_real += dx / state->zoom_factor;
     state->pan_imag += dy / state->zoom_factor;
 }
 
-bool Fractalis::is_in_main_bulb(const std::complex<long double>& c) {
-    long double x = c.real();
-    long double y = c.imag();
+bool Fractalis::is_in_main_bulb(const std::complex<double>& c) {
+    double x = c.real();
+    double y = c.imag();
 
     // Check for main cardioid
-    long double q = (x - 0.25L) * (x - 0.25L) + y * y;
-    if (q * (q + (x - 0.25L)) <= 0.25L * y * y) {
+    double q = (x - 0.25) * (x - 0.25) + y * y;
+    if (q * (q + (x - 0.25)) <= 0.25 * y * y) {
         return true;
     }
 
     // Check for period-2 bulb
-    if ((x + 1.0L) * (x + 1.0L) + y * y <= 0.0625L) {
+    if ((x + 1) * (x + 1) + y * y <= 0.0625) {
         return true;
     }
 
