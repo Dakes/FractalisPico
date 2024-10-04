@@ -18,6 +18,7 @@ public:
 private:
     FractalisState* state;
     Fractalis* fractalis;
+    bool randomized_start;
 
     static constexpr int TILE_SIZE = 32;  // Size of tiles for detail analysis
     static constexpr double CENTER_BIAS = 1.2;  // Bias factor for center tiles

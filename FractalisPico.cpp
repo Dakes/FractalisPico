@@ -42,6 +42,8 @@ void render_fractal();
 void render_overlay();
 void handle_input();
 void calculate_pixel_concentric(int x, int y);
+void initialize_rand();
+
 
 int main() {
     if (DEBUG) {
@@ -355,6 +357,7 @@ void handle_input() {
     bool state_changed = false;
     ButtonState new_state = ButtonState::IDLE;
 
+    initialize_rand();
     for (int i = 0; i < 4; ++i) {
         if (buttons[i]->raw()) {
             if (button_states[i] == ButtonState::IDLE) {
@@ -433,4 +436,12 @@ void handle_input() {
         state.last_updated_radius = 0;
         state.rendering = 3;
     }
+}
+
+void initialize_rand() {
+    static bool initialized = false;
+    if (initialized)
+        return;
+    srand(to_ms_since_boot(get_absolute_time()));
+    initialized = true;
 }

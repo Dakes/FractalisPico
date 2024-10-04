@@ -4,7 +4,9 @@
 #include <cmath>
 
 AutoZoom::AutoZoom(FractalisState* state, Fractalis* fractalis)
-    : state(state), fractalis(fractalis) {}
+    : state(state), fractalis(fractalis) {
+        this->randomized_start = false;
+    }
 
 void AutoZoom::dive() {
     static bool panned = false;
@@ -57,11 +59,22 @@ std::pair<int, int> AutoZoom::identifyCenterOfTileOfDetail() {
 }
 
 void AutoZoom::initiatePan(int x, int y) {
-    printf("initiatePanAndZoom: %d, %d\n");
-    // Calculate pan direction and amount
     double panX = (x - state->screen_w / 2) / static_cast<double>(state->screen_w) * PAN_CONSTANT;
     double panY = (y - state->screen_h / 2) / static_cast<double>(state->screen_h) * PAN_CONSTANT;
-    printf("2 panX, PanY: %f, %f\n", panX, panY);
+
+    if (!this->randomized_start) {
+        const double max = 1.0;
+        const double min = -max;
+        float random_x = ((float) rand()) / (float) RAND_MAX;
+        float random_y = ((float) rand()) / (float) RAND_MAX;
+
+        const float range = max - min;
+
+        panX += (random_x*range) + min;
+        panY += (random_y*range) + min;
+        printf("Panning with randomized coordinates: x:%f, y:%f\n", panX, panY);
+        this->randomized_start = true;
+    }
 
     fractalis->pan(panX, panY);
 }
