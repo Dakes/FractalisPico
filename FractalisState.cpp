@@ -3,7 +3,7 @@
 #include <algorithm>
 
 FractalisState::FractalisState(int width, int height)
-    : screen_w(width), screen_h(height), zoom_factor(1.0), pan_real(0), pan_imag(0), led_skip_counter(0), skip_pre_render(false), hide_ui(false), last_pan_direction(PAN_NONE),
+    : screen_w(width), screen_h(height), zoom_factor(1.0), pan_real(0), pan_imag(0), led_skip_counter(0), skip_pre_render(false), hide_ui(false), last_pan_direction(PAN_NONE), auto_zoom(false),
       last_updated_radius(0), calculating(0), calculation_id(0), rendering(0), iteration_limit(25), color_iteration_limit(25) {
     
     center = {-0.5, 0};

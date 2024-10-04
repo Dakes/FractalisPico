@@ -46,6 +46,7 @@ add_executable(${NAME}
     FractalisPico.cpp # Your main source file
     FractalisState.cpp
     fractalis.cpp
+    AutoZoom.cpp
 )
 
 # Include required libraries

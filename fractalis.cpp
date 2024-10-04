@@ -1,4 +1,5 @@
 #include "fractalis.h"
+#include "globals.h"
 #include <cmath>
 
 Fractalis::Fractalis(FractalisState* state) : state(state) {}
@@ -142,11 +143,47 @@ void Fractalis::calculate_pixel(int x, int y, int iter_limit) {
 
 void Fractalis::zoom(double factor) {
     state->zoom_factor *= 1.L + factor;
+    state->calculating = 2;
+    state->calculation_id++;
+    state->last_updated_radius = 0;
+    state->rendering = 3;
+    printf("Zooming. New Zoom Factor: %f\n", state->zoom_factor);
 }
 
 void Fractalis::pan(double dx, double dy) {
+    // Calculate pixel shifts at the beginning
+    static const uint16_t PIXEL_SHIFT_X = static_cast<int>(PAN_CONSTANT * state->screen_w / 3.0);
+    static const uint16_t PIXEL_SHIFT_Y = static_cast<int>(PAN_CONSTANT * state->screen_h / 2.0);
+    // shift pixel state
+    if (dx > 0) {
+        state->last_pan_direction = PAN_RIGHT;
+        state->shiftPixelState(-PIXEL_SHIFT_X, 0);
+        state->resetPixelComplete(0, 0, PIXEL_SHIFT_X, state->screen_h - 1);
+    } else if (dx < 0) {
+        state->last_pan_direction = PAN_LEFT;
+        state->shiftPixelState(PIXEL_SHIFT_X, 0);
+        state->resetPixelComplete(state->screen_w - PIXEL_SHIFT_X, 0, state->screen_w - 1, state->screen_h - 1);
+    }
+    if (dy > 0) {
+        state->last_pan_direction = PAN_UP;
+        state->shiftPixelState(0, -PIXEL_SHIFT_Y);
+        state->resetPixelComplete(0, 0, state->screen_w - 1, PIXEL_SHIFT_Y);
+    } else if (dy < 0) {
+        state->last_pan_direction = PAN_DOWN;
+        state->shiftPixelState(0, PIXEL_SHIFT_Y);
+        state->resetPixelComplete(0, state->screen_h - PIXEL_SHIFT_Y, state->screen_w - 1, state->screen_h - 1);
+    }
+
+    // state->shiftPixelState(0, -PIXEL_SHIFT_Y);
+    // state->resetPixelComplete(0, state.screen_h - PIXEL_SHIFT_Y, state.screen_w - 1, state.screen_h - 1);
+
+    state->calculating = 1;
+    state->rendering = 3;
+    state->calculation_id++;
+    state->last_updated_radius = 0;
     state->pan_real += DoubleDouble(dx / state->zoom_factor);
     state->pan_imag += DoubleDouble(dy / state->zoom_factor);
+    printf("Panning by (%f, %f). New Pan: (%f, %f)\n", dx, dy, state->pan_real.upper, state->pan_imag.upper);
 }
 
 bool Fractalis::is_in_main_bulb(const std::complex<double>& c) {

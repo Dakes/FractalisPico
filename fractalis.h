@@ -12,6 +12,11 @@ public:
     Fractalis(FractalisState* state);
     void calculate_pixel(int x, int y, int iter_limit);
     void zoom(double factor);
+    /**
+     * @brief Pan the fractal view by the given amount.
+     * @param dx The amount to pan in the x direction. between -1-1.
+     * @param dy The amount to pan in the y direction. between -1-1.
+     */
     void pan(double dx, double dy);
 
 private:

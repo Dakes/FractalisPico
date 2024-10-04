@@ -46,6 +46,7 @@ public:
     DoubleDouble pan_imag;
     volatile int last_updated_radius;
     PAN_DIRECTION last_pan_direction;
+    bool auto_zoom;
 
     volatile uint8_t led_skip_counter;
 

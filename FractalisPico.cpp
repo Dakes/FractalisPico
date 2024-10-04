@@ -10,6 +10,7 @@
 #include "button.hpp"
 #include "FractalisState.h"
 #include "fractalis.h"
+#include "AutoZoom.hpp"
 #include "globals.h"
 #include "doubledouble.h"
 #include <chrono>
@@ -17,20 +18,6 @@
 
 using namespace pimoroni;
 using namespace doubledouble;
-
-#define DEBUG true
-#define UPDATE_SLEEP 16
-#define LONG_PRESS_DURATION 150/UPDATE_SLEEP
-#define PAN_CONSTANT 0.2L
-#define ZOOM_CONSTANT 0.2L
-#define UPDATE_INTERVAL 100  // Update display every 100 pixels calculated
-
-#define LOWEST_ITER 25
-#define MAX_ITER 10000
-
-#define START_HUE 0.6222
-#define SATURATION_THRESHOLD 0.08f
-#define VALUE_THRESHOLD 0.06f
 
 
 ST7789 st7789(PicoDisplay::WIDTH, PicoDisplay::HEIGHT, ROTATE_0, false, get_spi_pins(BG_SPI_FRONT));
@@ -43,6 +30,7 @@ Button button_y(PicoDisplay::Y);
 
 FractalisState state(PicoDisplay::WIDTH, PicoDisplay::HEIGHT);
 Fractalis fractalis(&state);
+AutoZoom autoZoom(&state, &fractalis);
 
 void core1_entry();
 void initialize_state();
@@ -83,6 +71,8 @@ int main() {
         update_led();
         handle_input();
         update_display();
+        if (state.auto_zoom && state.calculating <= 0 && state.rendering <= 0)
+            autoZoom.dive();
         sleep_ms(UPDATE_SLEEP);
     }
 
@@ -179,8 +169,8 @@ void update_display() {
 }
 
 void render_fractal() {
-    const int PIXEL_SHIFT_X = static_cast<int>(PAN_CONSTANT * state.screen_w);
-    const int PIXEL_SHIFT_Y = static_cast<int>(PAN_CONSTANT * state.screen_h);
+    static const uint16_t PIXEL_SHIFT_X = static_cast<int>(PAN_CONSTANT * state.screen_w / 3.0);
+    static const uint16_t PIXEL_SHIFT_Y = static_cast<int>(PAN_CONSTANT * state.screen_h / 2.0);
     
     int start_x = 0, end_x = state.screen_w;
     int start_y = 0, end_y = state.screen_h;
@@ -303,6 +293,11 @@ void render_overlay() {
 
     info_y += font8_height*3 + margin;
     display.text(zoom_text, Point(margin, info_y), display.bounds.w - 2 * margin, scale);
+
+    if (state.auto_zoom) {
+        info_y += font8_height + margin;
+        display.text("Auto Zoom: ON", Point(margin, info_y), display.bounds.w, scale);
+    }
 }
 
 void update_led() {
@@ -316,7 +311,10 @@ void update_led() {
     } else if (state.calculating == 1) {
         led.set_rgb(255, 150, 0);
     } else if (state.calculating == 0 && state.rendering <= 1) {
-        led.set_rgb(0, 255, 0);
+        if (state.auto_zoom)
+            led.set_rgb(0, 255, 150);
+        else
+            led.set_rgb(0, 255, 0);
     }
 }
 
@@ -355,12 +353,7 @@ void handle_input() {
     
     Button* buttons[4] = {&button_a, &button_b, &button_x, &button_y};
     bool state_changed = false;
-    bool panned = false;
     ButtonState new_state = ButtonState::IDLE;
-
-    // Calculate pixel shifts at the beginning
-    static const uint16_t PIXEL_SHIFT_X = static_cast<int>(PAN_CONSTANT * state.screen_w / 3.0);
-    static const uint16_t PIXEL_SHIFT_Y = static_cast<int>(PAN_CONSTANT * state.screen_h / 2.0);
 
     for (int i = 0; i < 4; ++i) {
         if (buttons[i]->raw()) {
@@ -376,7 +369,6 @@ void handle_input() {
                 switch (i) {
                     case 0: // Button A: Function
                         state.hide_ui = !state.hide_ui;
-                        // TODO: auto zoom start/stop
                         // TODO: reset to initial position
                         if (button_pressed_durations[i] > LONG_PRESS_DURATION*4) {
                             printf("Longer function press");
@@ -389,19 +381,9 @@ void handle_input() {
                         break;
                     case 1: // Button B: Pan Down
                         fractalis.pan(0, PAN_CONSTANT);
-                        state.shiftPixelState(0, -PIXEL_SHIFT_Y);
-                        state.resetPixelComplete(0, state.screen_h - PIXEL_SHIFT_Y, state.screen_w - 1, state.screen_h - 1);
-                        panned = true;
-                        state_changed = true;
-                        state.last_pan_direction = PAN_DOWN;
                         break;
                     case 2: // Button X: Pan Up
                         fractalis.pan(0, -PAN_CONSTANT);
-                        state.shiftPixelState(0, PIXEL_SHIFT_Y);
-                        state.resetPixelComplete(0, 0, state.screen_w - 1, PIXEL_SHIFT_Y - 1);
-                        panned = true;
-                        state_changed = true;
-                        state.last_pan_direction = PAN_UP;
                         break;
                     case 3: // Button Y: Zoom
                         fractalis.zoom(-ZOOM_CONSTANT);
@@ -417,23 +399,16 @@ void handle_input() {
                 new_state = ButtonState::PRESSED;
                 state_changed = true;
                 switch (i) {
-                    case 0: // Button A
+                    case 0: // Button A: Auto Zoom
+                        state.auto_zoom = !state.auto_zoom;
+                        break;
                         led.set_rgb(0, 255, 0);
                         break;
                     case 1: // Button B: Pan Left
-                        printf("shifting by: %d pixels\n", PIXEL_SHIFT_X);
                         fractalis.pan(-PAN_CONSTANT, 0);
-                        state.shiftPixelState(PIXEL_SHIFT_X, 0);
-                        state.resetPixelComplete(0, 0, PIXEL_SHIFT_X - 1, state.screen_h - 1);
-                        panned = true;
-                        state.last_pan_direction = PAN_LEFT;
                         break;
                     case 2: // Button X: Pan Right
                         fractalis.pan(PAN_CONSTANT, 0);
-                        state.shiftPixelState(-PIXEL_SHIFT_X, 0);
-                        state.resetPixelComplete(state.screen_w - PIXEL_SHIFT_X, 0, state.screen_w - 1, state.screen_h - 1);
-                        panned = true;
-                        state.last_pan_direction = PAN_RIGHT;
                         break;
                     case 3: // Button Y: Zoom
                         fractalis.zoom(ZOOM_CONSTANT);
@@ -455,14 +430,9 @@ void handle_input() {
     }
 
     if (state_changed) {
-        if (panned) {
-            state.calculating = 1;
-        }
-        else {
-            state.calculating = 2;
-        }
-        state.rendering = 3;
+        state.calculating = 2;
         state.calculation_id++;
         state.last_updated_radius = 0;
+        state.rendering = 3;
     }
 }
