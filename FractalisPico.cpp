@@ -145,13 +145,15 @@ void core1_entry() {
         }
 
         printf("Core1: Pixel calculation complete for iteration limit: %d. Pre-render: %d\n", state.iteration_limit, !state.skip_pre_render);
-        if (state.calculation_id == current_calculation_id && !state.skip_pre_render && state.calculating >= 2) {
-            state.resetPixelComplete();
-            state.rendering = 2;
-            state.calculating = 1;
-        } else if (state.calculation_id == current_calculation_id && state.calculating == 1) {
-            state.rendering = 2;
-            state.calculating = 0;
+        if (state.calculation_id == current_calculation_id) {
+            if (!state.skip_pre_render && state.calculating >= 2) {
+                state.resetPixelComplete();
+                state.rendering = 3;  // Trigger a full render
+                state.calculating = 1;
+            } else if (state.calculating == 1) {
+                state.rendering = 3;  // Trigger a full render
+                state.calculating = 0;
+            }
         }
     }
 }
@@ -229,7 +231,6 @@ void render_fractal() {
             state.rendering = 0;
             state.last_pan_direction = PAN_NONE;
         }
-        printf("Done with rendering. Pixels rendered: %u\n", pixel_rendered_counter);
     }
 }
 
@@ -459,7 +460,6 @@ void handle_input() {
         }
         else {
             state.calculating = 2;
-            state.rendering = 2;
         }
         state.rendering = 3;
         state.calculation_id++;
