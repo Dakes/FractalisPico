@@ -46,6 +46,7 @@ void FractalisState::resetPixelCompleteInternal(int x1, int y1, int x2, int y2) 
     for (int y = y1; y <= y2; ++y) {
         for (int x = x1; x <= x2; ++x) {
             pixelState[y][x].isComplete = false;
+            pixelState[y][x].iteration = 0;
         }
     }
 }

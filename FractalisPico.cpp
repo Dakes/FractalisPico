@@ -169,14 +169,14 @@ void update_display() {
 }
 
 void render_fractal() {
+    // TODO: this must be determined dynamically but maybe we don't need it at all??
     static const uint16_t PIXEL_SHIFT_X = static_cast<int>(PAN_CONSTANT * state.screen_w / 3.0);
     static const uint16_t PIXEL_SHIFT_Y = static_cast<int>(PAN_CONSTANT * state.screen_h / 2.0);
     
     int start_x = 0, end_x = state.screen_w;
     int start_y = 0, end_y = state.screen_h;
     
-    if (state.rendering == 2) {  // Partial render
-        // Determine which areas need to be rendered based on the last pan operation
+    if (state.rendering == 2) {
         if (state.last_pan_direction == PAN_LEFT) {
             start_x = 0;
             end_x = PIXEL_SHIFT_X;
@@ -198,9 +198,9 @@ void render_fractal() {
 
     for(int y = start_y; y < end_y; ++y) {
         for(int x = start_x; x < end_x; ++x) {
-            if (!state.pixelState[y][x].isComplete)
+            if (!state.pixelState[y][x].isComplete) {
                 continue;
-            if (state.pixelState[y][x].iteration >= state.iteration_limit) {
+            } else if (state.pixelState[y][x].iteration >= state.iteration_limit) {
                 display.set_pen(0, 0, 0);
             } else {
                 float iteration_ratio = std::log(1 + state.pixelState[y][x].smooth_iteration) / 2.0f;
@@ -397,12 +397,9 @@ void handle_input() {
         } else if (button_states[i] != ButtonState::IDLE) {
             if (button_states[i] == ButtonState::PRESSED) {
                 new_state = ButtonState::PRESSED;
-                state_changed = true;
                 switch (i) {
                     case 0: // Button A: Auto Zoom
                         state.auto_zoom = !state.auto_zoom;
-                        break;
-                        led.set_rgb(0, 255, 0);
                         break;
                     case 1: // Button B: Pan Left
                         fractalis.pan(-PAN_CONSTANT, 0);
@@ -411,6 +408,7 @@ void handle_input() {
                         fractalis.pan(PAN_CONSTANT, 0);
                         break;
                     case 3: // Button Y: Zoom
+                        state_changed = true;
                         fractalis.zoom(ZOOM_CONSTANT);
                         state.resetPixelComplete();
                         break;

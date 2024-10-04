@@ -22,10 +22,10 @@ void AutoZoom::dive() {
         initiatePan(zoomPoint.first, zoomPoint.second);
         panned = true;
     } else {
-        fractalis->zoom(ZOOM_CONSTANT/4.0L);
+        fractalis->zoom(ZOOM_CONSTANT/2.0L);
         panned = false;
     }
-    // skip_counter = (1000/UPDATE_SLEEP)*60;  // sleep 1 minute before contiune
+    skip_counter = (1000/UPDATE_SLEEP); //*60;  // sleep 1 minute before contiune
 }
 
 std::pair<int, int> AutoZoom::identifyCenterOfTileOfDetail() {
@@ -63,23 +63,7 @@ void AutoZoom::initiatePan(int x, int y) {
     double panY = (y - state->screen_h / 2) / static_cast<double>(state->screen_h) * PAN_CONSTANT;
     printf("2 panX, PanY: %f, %f\n", panX, panY);
 
-    // Normalize pan to standard pan amount
-    // panX = static_cast<int>(panX * PAN_CONSTANT);
-    // panY = static_cast<int>(panY * PAN_CONSTANT);
-    // printf("3 panX, PanY: %f, %f\n", panX, panY);
-
-    // Initiate pan
     fractalis->pan(panX, panY);
-
-    // Initiate zoom
-    // fractalis->zoom(ZOOM_CONSTANT/4);
-
-    // Update state
-    // state->resetPixelComplete();
-    // state->calculating = 2;
-    // state->rendering = 3;
-    // state->calculation_id++;
-    // state->last_updated_radius = 0;
 }
 
 std::pair<int, int> AutoZoom::calculateCenter(int tileX, int tileY) {
