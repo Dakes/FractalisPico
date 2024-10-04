@@ -297,7 +297,7 @@ void render_overlay() {
     int32_t zoom_text_width = display.measure_text(zoom_text, scale, 1);
 
     // Position for coordinates and zoom factor
-    int info_y = margin*2 + margin + font8_height;
+    int info_y = margin*3 + font8_height;
     display.text(coord_text, Point(margin, info_y), display.bounds.w - 2 * margin, scale);
 
     info_y += font8_height*3 + margin;
@@ -313,8 +313,6 @@ void render_overlay() {
         info_y += font8_height + margin;
         display.text("Auto Zoom: ON", Point(margin, info_y), display.bounds.w, scale);
     }
-
-
 }
 
 void update_led() {
@@ -372,7 +370,6 @@ void handle_input() {
     bool state_changed = false;
     ButtonState new_state = ButtonState::IDLE;
 
-    initialize_rand();
     for (int i = 0; i < 4; ++i) {
         if (buttons[i]->raw()) {
             if (button_states[i] == ButtonState::IDLE) {
@@ -384,6 +381,7 @@ void handle_input() {
             if (button_pressed_durations[i] > LONG_PRESS_DURATION && button_states[i] == ButtonState::PRESSED) {
                 button_states[i] = ButtonState::LONG_PRESSED;
                 new_state = ButtonState::LONG_PRESSED;
+                initialize_rand();
                 switch (i) {
                     case 0: // Button A: Function
                         state.hide_ui = !state.hide_ui;
@@ -415,6 +413,7 @@ void handle_input() {
         } else if (button_states[i] != ButtonState::IDLE) {
             if (button_states[i] == ButtonState::PRESSED) {
                 new_state = ButtonState::PRESSED;
+                initialize_rand();
                 switch (i) {
                     case 0: // Button A: Auto Zoom
                         state.auto_zoom = !state.auto_zoom;
