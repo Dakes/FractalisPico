@@ -117,6 +117,14 @@ void core1_entry() {
                 if (!state.skip_pre_render) {
                     state.calculating = 2;
                 }
+                // Reset the state of the last rendered radius
+                radius--;
+                int center_x = state.screen_w / 2;
+                int center_y = state.screen_h / 2;
+                state.resetPixelComplete(center_x - radius, center_y - radius, center_x + radius, center_y - radius);
+                state.resetPixelComplete(center_x - radius, center_y + radius, center_x + radius, center_y + radius);
+                state.resetPixelComplete(center_x - radius, center_y - radius, center_x - radius, center_y + radius);
+                state.resetPixelComplete(center_x + radius, center_y - radius, center_x + radius, center_y + radius);
                 break;
             }
             for(int x = -radius; x <= radius; ++x) {
@@ -171,7 +179,6 @@ void update_display() {
 }
 
 void render_fractal() {
-    // TODO: this must be determined dynamically but maybe we don't need it at all??
     static const uint16_t PIXEL_SHIFT_X = static_cast<int>(PAN_CONSTANT * state.screen_w / 3.0);
     static const uint16_t PIXEL_SHIFT_Y = static_cast<int>(PAN_CONSTANT * state.screen_h / 2.0);
     
@@ -296,10 +303,18 @@ void render_overlay() {
     info_y += font8_height*3 + margin;
     display.text(zoom_text, Point(margin, info_y), display.bounds.w - 2 * margin, scale);
 
+    // iterations
+    info_y += font8_height + margin;
+    char iterations_text[30];
+    snprintf(iterations_text, sizeof(iterations_text), "Iterations: %d", state.iteration_limit);
+    display.text(iterations_text, Point(margin, info_y), display.bounds.w, scale);
+
     if (state.auto_zoom) {
         info_y += font8_height + margin;
         display.text("Auto Zoom: ON", Point(margin, info_y), display.bounds.w, scale);
     }
+
+
 }
 
 void update_led() {

@@ -178,7 +178,6 @@ void Fractalis::pan(double dx, double dy) {
     state->last_updated_radius = 0;
     state->pan_real += DoubleDouble(dx / state->zoom_factor);
     state->pan_imag += DoubleDouble(dy / state->zoom_factor);
-    printf("Panning by (%f, %f). New Pan: (%f, %f)\n\n", dx, dy, state->pan_real.upper, state->pan_imag.upper);
 }
 
 bool Fractalis::is_in_main_bulb(const std::complex<double>& c) {
