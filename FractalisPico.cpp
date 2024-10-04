@@ -20,7 +20,7 @@ using namespace doubledouble;
 
 #define DEBUG true
 #define UPDATE_SLEEP 16
-#define LONG_PRESS_DURATION 100/UPDATE_SLEEP
+#define LONG_PRESS_DURATION 150/UPDATE_SLEEP
 #define PAN_CONSTANT 0.2L
 #define ZOOM_CONSTANT 0.2L
 #define UPDATE_INTERVAL 100  // Update display every 100 pixels calculated
@@ -29,8 +29,8 @@ using namespace doubledouble;
 #define MAX_ITER 10000
 
 #define START_HUE 0.6222
-#define SATURATION_THRESHOLD 0.05f
-#define VALUE_THRESHOLD 0.04f
+#define SATURATION_THRESHOLD 0.08f
+#define VALUE_THRESHOLD 0.06f
 
 
 ST7789 st7789(PicoDisplay::WIDTH, PicoDisplay::HEIGHT, ROTATE_0, false, get_spi_pins(BG_SPI_FRONT));
@@ -167,7 +167,7 @@ void cleanup_state() {
 void update_display() {
     if (state.rendering <= 0)
         return;
-    if (state.rendering == 2)
+    if (state.rendering > 0)
         render_fractal();
 
     render_overlay();
@@ -177,14 +177,35 @@ void update_display() {
 }
 
 void render_fractal() {
-    const int last_updated = state.last_updated_radius;
+    const int PIXEL_SHIFT_X = static_cast<int>(PAN_CONSTANT * state.screen_w);
+    const int PIXEL_SHIFT_Y = static_cast<int>(PAN_CONSTANT * state.screen_h);
+    
+    int start_x = 0, end_x = state.screen_w;
+    int start_y = 0, end_y = state.screen_h;
+    
+    if (state.rendering == 2) {  // Partial render
+        // Determine which areas need to be rendered based on the last pan operation
+        if (state.last_pan_direction == PAN_LEFT) {
+            start_x = 0;
+            end_x = PIXEL_SHIFT_X;
+        } else if (state.last_pan_direction == PAN_RIGHT) {
+            start_x = state.screen_w - PIXEL_SHIFT_X;
+            end_x = state.screen_w;
+        } else if (state.last_pan_direction == PAN_UP) {
+            start_y = 0;
+            end_y = PIXEL_SHIFT_Y;
+        } else if (state.last_pan_direction == PAN_DOWN) {
+            start_y = state.screen_h - PIXEL_SHIFT_Y;
+            end_y = state.screen_h;
+        }
+    }
+    // For state.rendering == 3, we'll render the full screen
 
-    const int center_x = state.screen_w / 2;
-    const int center_y = state.screen_h / 2;
-    uint16_t pixel_rendered_counter = 0;
+    uint32_t pixel_rendered_counter = 0;
+    uint32_t total_pixels = (end_x - start_x) * (end_y - start_y);
 
-    for(int y = std::max(0, center_y - last_updated); y < std::min(state.screen_h, center_y + last_updated + 1); ++y) {
-        for(int x = std::max(0, center_x - last_updated); x < std::min(state.screen_w, center_x + last_updated + 1); ++x) {
+    for(int y = start_y; y < end_y; ++y) {
+        for(int x = start_x; x < end_x; ++x) {
             if (!state.pixelState[y][x].isComplete)
                 continue;
             if (state.pixelState[y][x].iteration >= state.iteration_limit) {
@@ -201,9 +222,14 @@ void render_fractal() {
         }
     }
 
-    if (pixel_rendered_counter >= state.screen_w * state.screen_h) {
-        state.rendering = 1;
-        printf("setting state.rendering to 1\n");
+    if (pixel_rendered_counter >= total_pixels) {
+        if (state.rendering == 3) {
+            state.rendering = 2;  // Set to 2 to indicate partial renders are now possible
+        } else {
+            state.rendering = 0;
+            state.last_pan_direction = PAN_NONE;
+        }
+        printf("Done with rendering. Pixels rendered: %u\n", pixel_rendered_counter);
     }
 }
 
@@ -366,6 +392,7 @@ void handle_input() {
                         state.resetPixelComplete(0, state.screen_h - PIXEL_SHIFT_Y, state.screen_w - 1, state.screen_h - 1);
                         panned = true;
                         state_changed = true;
+                        state.last_pan_direction = PAN_DOWN;
                         break;
                     case 2: // Button X: Pan Up
                         fractalis.pan(0, -PAN_CONSTANT);
@@ -373,6 +400,7 @@ void handle_input() {
                         state.resetPixelComplete(0, 0, state.screen_w - 1, PIXEL_SHIFT_Y - 1);
                         panned = true;
                         state_changed = true;
+                        state.last_pan_direction = PAN_UP;
                         break;
                     case 3: // Button Y: Zoom
                         fractalis.zoom(-ZOOM_CONSTANT);
@@ -397,12 +425,14 @@ void handle_input() {
                         state.shiftPixelState(PIXEL_SHIFT_X, 0);
                         state.resetPixelComplete(0, 0, PIXEL_SHIFT_X - 1, state.screen_h - 1);
                         panned = true;
+                        state.last_pan_direction = PAN_LEFT;
                         break;
                     case 2: // Button X: Pan Right
                         fractalis.pan(PAN_CONSTANT, 0);
                         state.shiftPixelState(-PIXEL_SHIFT_X, 0);
                         state.resetPixelComplete(state.screen_w - PIXEL_SHIFT_X, 0, state.screen_w - 1, state.screen_h - 1);
                         panned = true;
+                        state.last_pan_direction = PAN_RIGHT;
                         break;
                     case 3: // Button Y: Zoom
                         fractalis.zoom(ZOOM_CONSTANT);
@@ -424,11 +454,14 @@ void handle_input() {
     }
 
     if (state_changed) {
-        if (panned)
+        if (panned) {
             state.calculating = 1;
-        else
+        }
+        else {
             state.calculating = 2;
-        state.rendering = 2;
+            state.rendering = 2;
+        }
+        state.rendering = 3;
         state.calculation_id++;
         state.last_updated_radius = 0;
     }

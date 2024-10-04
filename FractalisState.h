@@ -45,6 +45,7 @@ public:
     DoubleDouble pan_real;
     DoubleDouble pan_imag;
     volatile int last_updated_radius;
+    PAN_DIRECTION last_pan_direction;
 
     volatile uint8_t led_skip_counter;
 
@@ -62,8 +63,10 @@ public:
 
     /**
      * tracking, if the screen is rendering and if a new rendering is needed. Different values have different meanings
+     * 0: Done
      * 1: Antialiasing pass
      * 2: screen rendering needed
+     * 3: Whole screen render needed, in case of pan
      */
     volatile uint8_t rendering;
     volatile uint16_t iteration_limit;
