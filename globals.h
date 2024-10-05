@@ -1,7 +1,7 @@
 #ifndef GLOBALS_H
 #define GLOBALS_H
 
-#define DEBUG true
+#define DEBUG false
 #define UPDATE_SLEEP 16
 #define LONG_PRESS_DURATION 150/UPDATE_SLEEP
 #define PAN_CONSTANT 0.2L

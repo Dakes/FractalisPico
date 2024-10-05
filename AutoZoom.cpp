@@ -27,8 +27,8 @@ void AutoZoom::dive() {
         fractalis->zoom(ZOOM_CONSTANT/1.5L);
         panned = false;
     }
-    skip_counter = 10;
-    // skip_counter = (1000/UPDATE_SLEEP)*60;  // sleep 1 minute before contiune
+    // skip_counter = 10;
+    skip_counter = (1000/UPDATE_SLEEP)*60;  // sleep 1 minute before contiune
 }
 
 std::pair<int, int> AutoZoom::identifyCenterOfTileOfDetail() {
