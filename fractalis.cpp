@@ -49,7 +49,7 @@ void Fractalis::calculate_pixel_double(int x, int y, int iter_limit) {
     if (x < 0 || x >= state->screen_w || y < 0 || y >= state->screen_h) {
         return;
     }
-    if (state->pixelState[y][x].isComplete) {
+    if (state->pixelState[y][x].isComplete()) {
         return;
     }
 
@@ -59,7 +59,7 @@ void Fractalis::calculate_pixel_double(int x, int y, int iter_limit) {
 
     if (!skip_optimizations && is_in_main_bulb(c)) {
         state->pixelState[y][x].iteration = iter_limit;
-        state->pixelState[y][x].isComplete = true;
+        state->pixelState[y][x].setIsComplete(true);
         return;
     }
 
@@ -91,13 +91,13 @@ void Fractalis::calculate_pixel_double(int x, int y, int iter_limit) {
     if (iteration < iter_limit) {
         double log_zn = std::log(std::abs(z)) / 2;
         double nu = std::log(log_zn / std::log(2)) / std::log(2);
-        state->pixelState[y][x].smooth_iteration = iteration + 1 - nu;
+        state->pixelState[y][x].setSmoothIterationFloat(iteration + 1 - nu);
     } else {
-        state->pixelState[y][x].smooth_iteration = 1.0f;
+        state->pixelState[y][x].setSmoothIterationFloat(1.0f);
     }
 
     state->pixelState[y][x].iteration = iteration;
-    state->pixelState[y][x].isComplete = true;
+    state->pixelState[y][x].setIsComplete(true);
 }
 
 
@@ -105,7 +105,7 @@ void Fractalis::calculate_pixel_dd(int x, int y, int iter_limit) {
     if (x < 0 || x >= state->screen_w || y < 0 || y >= state->screen_h) {
         return;
     }
-    if (state->pixelState[y][x].isComplete) {
+    if (state->pixelState[y][x].isComplete()) {
         return;
     }
 
@@ -124,13 +124,13 @@ void Fractalis::calculate_pixel_dd(int x, int y, int iter_limit) {
         DoubleDouble log_zn = (z.real() * z.real() + z.imag() * z.imag()).log() / DoubleDouble(2);
         DoubleDouble log_N = DoubleDouble(16) * dd_ln2;
         DoubleDouble nu = (log_zn / log_N).log() / dd_ln2;
-        state->pixelState[y][x].smooth_iteration = (iteration + DoubleDouble(1) - nu).upper;
+        state->pixelState[y][x].setSmoothIterationFloat((iteration + DoubleDouble(1) - nu).upper);
     } else {
-        state->pixelState[y][x].smooth_iteration = 1.0f;
+        state->pixelState[y][x].setSmoothIterationFloat(1.0f);
     }
 
     state->pixelState[y][x].iteration = iteration;
-    state->pixelState[y][x].isComplete = true;
+    state->pixelState[y][x].setIsComplete(true);
 }
 
 void Fractalis::calculate_pixel(int x, int y, int iter_limit) {

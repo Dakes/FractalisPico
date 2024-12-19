@@ -20,11 +20,59 @@ struct Coordinate {
     DoubleDouble imag;
 };
 
+// We'll define a scaling factor for smooth_iteration.
+// For example, if we assume smooth_iteration generally is in the range of ~0 to a few thousands,
+// using a scale factor like 256 should provide enough precision (1/256 increments).
+#define SMOOTH_ITER_SCALE 1024.0f
+
 // Per-pixel data structure to track iteration counts and current z values
 struct PixelState {
-    uint16_t iteration;      // Current iteration count
-    bool isComplete;        // Flag indicating if the pixel computation is complete
-    float smooth_iteration; // Smooth iteration count for coloring
+    /**
+     * The iteration field is used as follows:
+     * - The lower bit (bit 0) is used to store the "isComplete" flag.
+     * - The remaining 15 bits store the iteration count.
+     *
+     * Layout:
+     *  bits: [15 ..................... 1 | 0 ]
+     *        [      iteration_count      |complete]
+     */
+    uint16_t iteration;
+    uint16_t smooth_iteration; // Smooth iteration count for coloring
+
+    uint16_t getIterationCount() const {
+        return iteration >> 1;
+    }
+
+    void setIterationCount(uint16_t iteration_count) {
+        bool complete = isComplete();
+        iteration = static_cast<uint16_t>((iteration_count << 1) | (complete ? 1 : 0));
+    }
+
+    bool isComplete() const {
+        return (iteration & 0x1) != 0;
+    }
+
+    void setIsComplete(bool complete) {
+        uint16_t iteration_count = getIterationCount();
+        iteration = static_cast<uint16_t>((iteration_count << 1) | (complete ? 1 : 0));
+    }
+
+    void setIterationAndComplete(uint16_t iteration_count, bool complete) {
+        iteration = static_cast<uint16_t>((iteration_count << 1) | (complete ? 1 : 0));
+    }
+
+    void setSmoothIterationFloat(float smooth) {
+        // Clamp smooth iteration to fit into uint16_t if necessary
+        // For safety, clamp to max representable value
+        float scaled = smooth * SMOOTH_ITER_SCALE;
+        if (scaled < 0.0f) scaled = 0.0f;
+        if (scaled > 65535.0f) scaled = 65535.0f;
+        smooth_iteration = static_cast<uint16_t>(scaled);
+    }
+
+    float getSmoothIterationFloat() const {
+        return static_cast<float>(smooth_iteration) / SMOOTH_ITER_SCALE;
+    }
 };
 
 class FractalisState {

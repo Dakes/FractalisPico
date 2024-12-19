@@ -19,8 +19,11 @@
 using namespace pimoroni;
 using namespace doubledouble;
 
+// Set to the width and height of your pimoroni display
+const uint16_t width = 320;
+const uint16_t height = 240;
 
-ST7789 st7789(PicoDisplay::WIDTH, PicoDisplay::HEIGHT, ROTATE_0, false, get_spi_pins(BG_SPI_FRONT));
+ST7789 st7789(width, height, ROTATE_0, false, get_spi_pins(BG_SPI_FRONT));
 PicoGraphics_PenRGB332 display(st7789.width, st7789.height, nullptr);
 RGBLED led(PicoDisplay::LED_R, PicoDisplay::LED_G, PicoDisplay::LED_B);
 Button button_a(PicoDisplay::A);
@@ -28,7 +31,7 @@ Button button_b(PicoDisplay::B);
 Button button_x(PicoDisplay::X);
 Button button_y(PicoDisplay::Y);
 
-FractalisState state(PicoDisplay::WIDTH, PicoDisplay::HEIGHT);
+FractalisState state(width, height);
 Fractalis fractalis(&state);
 AutoZoom autoZoom(&state, &fractalis);
 
@@ -207,12 +210,12 @@ void render_fractal() {
 
     for(int y = start_y; y < end_y; ++y) {
         for(int x = start_x; x < end_x; ++x) {
-            if (!state.pixelState[y][x].isComplete) {
+            if (!state.pixelState[y][x].isComplete()) {
                 continue;
             } else if (state.pixelState[y][x].iteration >= state.iteration_limit) {
                 display.set_pen(0, 0, 0);
             } else {
-                float iteration_ratio = std::log(1 + state.pixelState[y][x].smooth_iteration) / 2.0f;
+                float iteration_ratio = std::log(1 + state.pixelState[y][x].getSmoothIterationFloat()) / 2.0f;
                 float hue = fmodf(START_HUE + iteration_ratio, 1.0f);
                 float saturation = std::min(iteration_ratio / SATURATION_THRESHOLD, 1.0f);
                 float value = std::min(iteration_ratio / VALUE_THRESHOLD, 1.0f);
