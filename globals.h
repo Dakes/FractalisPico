@@ -1,11 +1,11 @@
 #ifndef GLOBALS_H
 #define GLOBALS_H
 
-#define DEBUG false
+#define DEBUG true
 #define UPDATE_SLEEP 16
 #define LONG_PRESS_DURATION 150/UPDATE_SLEEP
-#define PAN_CONSTANT 0.2L
-#define ZOOM_CONSTANT 0.2L
+#define PAN_CONSTANT 0.1L
+#define ZOOM_CONSTANT 0.1L
 #define UPDATE_INTERVAL 100  // Update display every 100 pixels calculated
 
 #define LOWEST_ITER 25

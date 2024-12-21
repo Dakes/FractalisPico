@@ -77,6 +77,7 @@ struct PixelState {
 
 class FractalisState {
 public:
+
     FractalisState(int width, int height);
     ~FractalisState();
 
@@ -87,6 +88,7 @@ public:
     // Public members
     int screen_w;
     int screen_h;
+    double ASPECT_RATIO;
     PixelState** pixelState;
     Coordinate center;
     double zoom_factor;

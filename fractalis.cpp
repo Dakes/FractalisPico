@@ -12,8 +12,9 @@ std::complex<double> Fractalis::pixel_to_point_double(int x, int y) {
     double x_percent = static_cast<double>(x) / state->screen_w;
     double y_percent = static_cast<double>(y) / state->screen_h;
     
-    double x_range = 3.0 / state->zoom_factor;
-    double y_range = 2.0 / state->zoom_factor;
+    
+    double x_range = 4.0 / state->zoom_factor;
+    double y_range = x_range / state->ASPECT_RATIO;
     
     double re = state->center.real.upper + (x_percent - 0.5) * x_range + state->pan_real.upper;
     double im = state->center.imag.upper + (y_percent - 0.5) * y_range + state->pan_imag.upper;
@@ -26,8 +27,9 @@ std::complex<DoubleDouble> Fractalis::pixel_to_point_dd(int x, int y) {
     DoubleDouble x_percent = DoubleDouble(x) / DoubleDouble(state->screen_w);
     DoubleDouble y_percent = DoubleDouble(y) / DoubleDouble(state->screen_h);
     
-    DoubleDouble x_range = DoubleDouble(3.0) / DoubleDouble(state->zoom_factor);
-    DoubleDouble y_range = DoubleDouble(2.0) / DoubleDouble(state->zoom_factor);
+    DoubleDouble aspect_ratio = DoubleDouble(state->screen_w) / DoubleDouble(state->screen_h);
+    DoubleDouble x_range = DoubleDouble(4.0) / DoubleDouble(state->zoom_factor);
+    DoubleDouble y_range = x_range / aspect_ratio;
     
     DoubleDouble re = state->center.real + (x_percent - DoubleDouble(0.5)) * x_range + state->pan_real;
     DoubleDouble im = state->center.imag + (y_percent - DoubleDouble(0.5)) * y_range + state->pan_imag;
@@ -150,11 +152,14 @@ void Fractalis::zoom(double factor) {
     printf("Zooming. New Zoom Factor: %f\n", state->zoom_factor);
 }
 
+/**
+ * dx and dy are the fractions of how much to pan in that direction from 0-1
+ * 0.5 means half the screen width or height
+ */
 void Fractalis::pan(double dx, double dy) {
-    printf("Panning. dx: %f, dy: %f\n", dx, dy);
     // Calculate pixel shifts based on the actual dx and dy
-    int pixel_shift_x = static_cast<int>(std::abs(dx) * state->screen_w / 3.0);
-    int pixel_shift_y = static_cast<int>(std::abs(dy) * state->screen_h / 2.0);
+    int pixel_shift_x = (std::abs(dx) * state->screen_w);
+    int pixel_shift_y = (std::abs(dy) * state->screen_h * state->ASPECT_RATIO);
 
     // Shift pixel state
     if (dx > 0) {
@@ -176,8 +181,11 @@ void Fractalis::pan(double dx, double dy) {
     state->rendering = 3;
     state->calculation_id++;
     state->last_updated_radius = 0;
-    state->pan_real += DoubleDouble(dx / state->zoom_factor);
-    state->pan_imag += DoubleDouble(dy / state->zoom_factor);
+
+    constexpr double INITIAL_VIEW_WIDTH = 4.0;
+    DoubleDouble range = DoubleDouble(INITIAL_VIEW_WIDTH) / DoubleDouble(state->zoom_factor);
+    state->pan_real += DoubleDouble(dx * range);
+    state->pan_imag += DoubleDouble(dy * range);
 }
 
 bool Fractalis::is_in_main_bulb(const std::complex<double>& c) {

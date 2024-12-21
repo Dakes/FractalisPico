@@ -7,6 +7,7 @@ FractalisState::FractalisState(int width, int height)
       last_updated_radius(0), calculating(0), calculation_id(0), rendering(0), iteration_limit(25), color_iteration_limit(25) {
 
     center = {-0.5, 0};
+    ASPECT_RATIO = static_cast<double>(width) / static_cast<double>(height);
 
     pixelState = new PixelState*[screen_h];
     for (int i = 0; i < screen_h; ++i) {

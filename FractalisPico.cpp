@@ -182,8 +182,8 @@ void update_display() {
 }
 
 void render_fractal() {
-    static const uint16_t PIXEL_SHIFT_X = static_cast<int>(PAN_CONSTANT * state.screen_w / 3.0);
-    static const uint16_t PIXEL_SHIFT_Y = static_cast<int>(PAN_CONSTANT * state.screen_h / 2.0);
+    static const uint16_t PIXEL_SHIFT_X = static_cast<int>(PAN_CONSTANT * state.screen_w);
+    static const uint16_t PIXEL_SHIFT_Y = static_cast<int>(PAN_CONSTANT * state.screen_h * state.ASPECT_RATIO);
     
     int start_x = 0, end_x = state.screen_w;
     int start_y = 0, end_y = state.screen_h;
@@ -202,6 +202,8 @@ void render_fractal() {
             start_y = state.screen_h - PIXEL_SHIFT_Y;
             end_y = state.screen_h;
         }
+        printf("start_x, end_x: %d, %d\n", start_x, end_x);
+        printf("start_y, end_y: %d, %d\n", start_y, end_y);
     }
     // For state.rendering == 3, we'll render the full screen
 
