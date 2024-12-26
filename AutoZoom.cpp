@@ -12,6 +12,7 @@ void AutoZoom::dive() {
     static bool panned = false;
     static uint16_t skip_counter = 0;
     if (!state->auto_zoom) return;
+    state->skip_pre_render = true;
 
     if (skip_counter > 0) {
         skip_counter--;
@@ -27,8 +28,8 @@ void AutoZoom::dive() {
         fractalis->zoom(ZOOM_CONSTANT/1.5L);
         panned = false;
     }
-    // skip_counter = 10;
-    skip_counter = (1000/UPDATE_SLEEP)*60;  // sleep 1 minute before contiune
+    const uint8_t sleep_s = 1;
+    skip_counter = (1000/UPDATE_SLEEP) * sleep_s;
 }
 
 std::pair<int, int> AutoZoom::identifyCenterOfTileOfDetail() {

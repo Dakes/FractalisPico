@@ -422,6 +422,7 @@ void handle_input() {
                 switch (i) {
                     case 0: // Button A: Auto Zoom
                         state.auto_zoom = !state.auto_zoom;
+                        printf("Auto Zoom: %d\n", state.auto_zoom);
                         break;
                     case 1: // Button B: Pan Left
                         fractalis.pan(-PAN_CONSTANT, 0);

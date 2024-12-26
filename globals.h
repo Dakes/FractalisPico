@@ -6,7 +6,7 @@
 #define LONG_PRESS_DURATION 150/UPDATE_SLEEP
 #define PAN_CONSTANT 0.1L
 #define ZOOM_CONSTANT 0.1L
-#define UPDATE_INTERVAL 100  // Update display every 100 pixels calculated
+#define UPDATE_INTERVAL 10  // Update display every n pixels calculated
 
 #define LOWEST_ITER 25
 #define MAX_ITER 10000
