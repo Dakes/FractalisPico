@@ -1,22 +1,25 @@
 #include "FractalisState.h"
 #include "globals.h"
 #include <algorithm>
+#include <cmath>
+#include <cstring>
 
 FractalisState::FractalisState(int width, int height)
-    : screen_w(width), screen_h(height), zoom_factor(1.0), pan_real(0), pan_imag(0), led_skip_counter(0), skip_pre_render(false), hide_ui(false), last_pan_direction(PAN_NONE), auto_zoom(false),
-      last_updated_radius(0), calculating(0), calculation_id(0), rendering(0), iteration_limit(25), color_iteration_limit(25) {
+    : screen_w(width), screen_h(height), zoom_factor(1.0), auto_zoom(false),
+      calculating(0), calculation_id(0), needs_redraw(false), iteration_limit(25), passes_completed(0), completed_limit(0) {
 
     center = {-0.5, 0};
-    ASPECT_RATIO = static_cast<double>(width) / static_cast<double>(height);
 
     pixelState = new PixelState*[screen_h];
     for (int i = 0; i < screen_h; ++i) {
         pixelState[i] = new PixelState[screen_w];
         for (int j = 0; j < screen_w; ++j) {
-            pixelState[i][j].setIterationAndComplete(0, false);
-            pixelState[i][j].smooth_iteration = 0;
+            pixelState[i][j].clear();
         }
     }
+    row_buffer = new PixelState[screen_w];
+    row_buffer2 = new PixelState[screen_w];
+    row_done = new bool[screen_h];
 }
 
 FractalisState::~FractalisState() {
@@ -24,29 +27,15 @@ FractalisState::~FractalisState() {
         delete[] pixelState[i];
     }
     delete[] pixelState;
-}
-
-void FractalisState::resetPixelComplete(int x1, int y1, int x2, int y2) {
-    resetPixelCompleteInternal(x1, y1, x2, y2);
+    delete[] row_buffer;
+    delete[] row_buffer2;
+    delete[] row_done;
 }
 
 void FractalisState::resetPixelComplete() {
-    resetPixelCompleteInternal(0, 0, screen_w - 1, screen_h - 1);
-}
-
-void FractalisState::resetPixelCompleteInternal(int x1, int y1, int x2, int y2) {
-    x1 = std::max(0, std::min(x1, screen_w - 1));
-    y1 = std::max(0, std::min(y1, screen_h - 1));
-    x2 = std::max(0, std::min(x2, screen_w - 1));
-    y2 = std::max(0, std::min(y2, screen_h - 1));
-
-    if (x1 > x2) std::swap(x1, x2);
-    if (y1 > y2) std::swap(y1, y2);
-
-    for (int y = y1; y <= y2; ++y) {
-        for (int x = x1; x <= x2; ++x) {
-            pixelState[y][x].setIterationAndComplete(0, false);
-            pixelState[y][x].smooth_iteration = 0;
+    for (int y = 0; y < screen_h; ++y) {
+        for (int x = 0; x < screen_w; ++x) {
+            pixelState[y][x].clear();
         }
     }
 }
@@ -55,63 +44,94 @@ void FractalisState::shiftPixelState(int dx, int dy) {
     if (dx == 0 && dy == 0) {
         return;
     }
+    dx = std::max(-screen_w, std::min(dx, screen_w));
+    dy = std::max(-screen_h, std::min(dy, screen_h));
 
-    // Horizontal shift
+    // Horizontal shift, row by row
     if (dx != 0) {
+        size_t keep = (screen_w - std::abs(dx)) * sizeof(PixelState);
         for (int y = 0; y < screen_h; ++y) {
+            PixelState* row = pixelState[y];
             if (dx > 0) {
-                // Shift to the right
-                for (int x = screen_w - 1; x >= dx; --x) {
-                    pixelState[y][x] = pixelState[y][x - dx];
-                }
-                // Mark newly exposed pixels on the left as incomplete
-                for (int x = 0; x < dx; ++x) {
-                    pixelState[y][x].setIterationAndComplete(0, false);
-                    pixelState[y][x].smooth_iteration = 0;
-                }
+                memmove(row + dx, row, keep);
+                for (int x = 0; x < dx; ++x) row[x].clear();
             } else {
-                // Shift to the left
-                for (int x = 0; x < screen_w + dx; ++x) {
-                    pixelState[y][x] = pixelState[y][x - dx];
-                }
-                // Mark newly exposed pixels on the right as incomplete
-                for (int x = screen_w + dx; x < screen_w; ++x) {
-                    pixelState[y][x].setIterationAndComplete(0, false);
-                    pixelState[y][x].smooth_iteration = 0;
-                }
+                memmove(row, row - dx, keep);
+                for (int x = screen_w + dx; x < screen_w; ++x) row[x].clear();
             }
         }
     }
 
-    // Vertical shift
+    // Vertical shift: rotating the row pointers is enough
     if (dy != 0) {
-        if (dy > 0) {
-            // Shift downwards
-            for (int y = screen_h - 1; y >= dy; --y) {
-                for (int x = 0; x < screen_w; ++x) {
-                    pixelState[y][x] = pixelState[y - dy][x];
-                }
+        int shift = ((dy % screen_h) + screen_h) % screen_h;
+        std::rotate(pixelState, pixelState + screen_h - shift, pixelState + screen_h);
+        int first_new = dy > 0 ? 0 : screen_h + dy;
+        int last_new = dy > 0 ? dy : screen_h;
+        for (int y = first_new; y < last_new; ++y) {
+            for (int x = 0; x < screen_w; ++x) pixelState[y][x].clear();
+        }
+    }
+}
+
+void FractalisState::scalePixelState(double ratio) {
+    const float cx = screen_w / 2.0f;
+    const float cy = screen_h / 2.0f;
+    const float r = static_cast<float>(ratio);
+    // Position of the source in the old content, in pixel center coordinates
+    auto source = [r](int i, float c) { return (i + 0.5f - c) * r + c - 0.5f; };
+
+    // Every new pixel is interpolated from the old content (bilinear on the palette position). This is done in
+    // place: when zooming in the sources lie closer to the center, so rows are processed from the outside in.
+    // When zooming out it is the other way round. Source rows are copied first, so they can't be overwritten while
+    // being read, rows that were already overwritten are not used as a source.
+    std::fill(row_done, row_done + screen_h, false);
+    for (int n = 0; n < screen_h; ++n) {
+        int k = ratio < 1.0 ? n : screen_h - 1 - n;  // distance rank from the outer edge
+        int y = (k % 2 == 0) ? k / 2 : screen_h - 1 - k / 2;
+        PixelState* row = pixelState[y];
+        row_done[y] = true;
+
+        float sy = source(y, cy);
+        if (sy < -0.5f || sy > screen_h - 0.5f) {
+            for (int x = 0; x < screen_w; ++x) row[x].clear();
+            continue;
+        }
+        int y0 = std::max(0, static_cast<int>(std::floor(sy)));
+        int y1 = std::min(screen_h - 1, y0 + 1);
+        float fy = std::max(0.0f, std::min(sy - y0, 1.0f));
+        if (row_done[y0] && y0 != y) { y0 = y1; }
+        if (row_done[y1] && y1 != y) { y1 = y0; }
+        memcpy(row_buffer, pixelState[y0], screen_w * sizeof(PixelState));
+        memcpy(row_buffer2, pixelState[y1], screen_w * sizeof(PixelState));
+        int wy = static_cast<int>(fy * 256.0f);
+
+        for (int x = 0; x < screen_w; ++x) {
+            float sx = source(x, cx);
+            if (sx < -0.5f || sx > screen_w - 0.5f) {
+                row[x].clear();
+                continue;
             }
-            // Mark newly exposed pixels at the top as incomplete
-            for (int y = 0; y < dy; ++y) {
-                for (int x = 0; x < screen_w; ++x) {
-                    pixelState[y][x].setIterationAndComplete(0, false);
-                    pixelState[y][x].smooth_iteration = 0;
-                }
-            }
-        } else {
-            // Shift upwards
-            for (int y = 0; y < screen_h + dy; ++y) {
-                for (int x = 0; x < screen_w; ++x) {
-                    pixelState[y][x] = pixelState[y - dy][x];
-                }
-            }
-            // Mark newly exposed pixels at the bottom as incomplete
-            for (int y = screen_h + dy; y < screen_h; ++y) {
-                for (int x = 0; x < screen_w; ++x) {
-                    pixelState[y][x].setIterationAndComplete(0, false);
-                    pixelState[y][x].smooth_iteration = 0;
-                }
+            int x0 = std::max(0, static_cast<int>(std::floor(sx)));
+            int x1 = std::min(screen_w - 1, x0 + 1);
+            float fx = std::max(0.0f, std::min(sx - x0, 1.0f));
+            const PixelState& a = row_buffer[x0];
+            const PixelState& b = row_buffer[x1];
+            const PixelState& c = row_buffer2[x0];
+            const PixelState& d = row_buffer2[x1];
+
+            if (a.showsColor() && b.showsColor() && c.showsColor() && d.showsColor()) {
+                int wx = static_cast<int>(fx * 256.0f);
+                auto lerp = [](int64_t p, int64_t q, int w) { return p + (((q - p) * w) >> 8); };
+                int64_t top = lerp(a.position(), b.position(), wx);
+                int64_t bottom = lerp(c.position(), d.position(), wx);
+                row[x].clear();
+                row[x].flags = PixelState::VALID;
+                row[x].setPosition(static_cast<uint32_t>(lerp(top, bottom, wy)));
+            } else {
+                // At the border of the set: nearest neighbor
+                row[x] = (fy < 0.5f ? row_buffer : row_buffer2)[fx < 0.5f ? x0 : x1];
+                row[x].markIncomplete();
             }
         }
     }

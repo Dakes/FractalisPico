@@ -1,4 +1,11 @@
-#!/bin/bash
+#!/usr/bin/env bash
+
+cd "$(dirname "$0")"
+
+# Configure the build directory on first use
+if [ ! -f build/build.ninja ]; then
+    cmake -B build -G Ninja || { echo "Configure failed. Exiting."; exit 1; }
+fi
 
 # Build the project
 ninja -C build
@@ -23,4 +30,3 @@ until flash_pico; do
 done
 
 echo "Flash successful!"
-

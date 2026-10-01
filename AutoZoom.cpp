@@ -2,39 +2,80 @@
 #include "globals.h"
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
+
+const AutoZoom::Speed AutoZoom::SPEEDS[] = {
+    {"x1.05", 1.05, 500, 1.0f},
+    {"x1.1", 1.1, 500, 1.0f},
+    {"x1.25", 1.25, 500, 1.0f},
+    {"x1.5", 1.5, 500, 1.0f},
+    {"x2", 2.0, 500, 1.0f},
+    {"fly", 1.04, 0, 0.25f},  // continuous: every frame finishes, but with less detail
+};
+const int AutoZoom::SPEED_COUNT = sizeof(SPEEDS) / sizeof(SPEEDS[0]);
 
 AutoZoom::AutoZoom(FractalisState* state, Fractalis* fractalis)
-    : state(state), fractalis(fractalis) {
-        this->randomized_start = false;
+    : state(state), fractalis(fractalis), randomized_start(false), next_step_ms(0), speed(1) {}
+
+// zoom() takes the relative change, e.g. 0.1 for x1.1
+static double zoom_in_change(double factor) { return factor - 1.0; }
+static double zoom_out_change(double factor) { return 1.0 / factor - 1.0; }
+
+void AutoZoom::start() {
+    // A random first step only from the overview, otherwise every dive would look the same
+    randomized_start = state->zoom_factor >= 2.0;
+    next_step_ms = 0;
+}
+
+void AutoZoom::next_speed() {
+    speed = (speed + 1) % SPEED_COUNT;
+    next_step_ms = 0;
+}
+
+const char* AutoZoom::speed_name() const {
+    return SPEEDS[speed].name;
+}
+
+void AutoZoom::dive(uint32_t now_ms, bool calculating) {
+    const Speed& s = SPEEDS[speed];
+    int needed_limit = static_cast<int>(s.detail * fractalis->max_iterations(state->zoom_factor));
+    bool ready = !calculating || (s.detail < 1.0f && state->completed_limit >= needed_limit);
+    if (!state->auto_zoom || !ready) {
+        next_step_ms = 0;
+        return;
     }
+    // Pause before every step
+    if (next_step_ms == 0) {
+        next_step_ms = now_ms + s.pause_ms;
+        return;
+    }
+    if (static_cast<int32_t>(now_ms - next_step_ms) < 0) {
+        return;
+    }
+    next_step_ms = 0;
 
-void AutoZoom::dive() {
-    static bool panned = false;
-    static uint16_t skip_counter = 0;
-    if (!state->auto_zoom) return;
-    state->skip_pre_render = true;
-
-    if (skip_counter > 0) {
-        skip_counter--;
+    if (state->zoom_factor >= MAX_ZOOM) {
+        printf("Auto zoom reached max zoom, stopping\n");
+        state->auto_zoom = false;
+        state->needs_redraw = true;
         return;
     }
 
-
-    std::pair<int, int> zoomPoint = identifyCenterOfTileOfDetail();
-    if (!panned) {
-        initiatePan(zoomPoint.first, zoomPoint.second);
-        panned = true;
+    int detail_score;
+    std::pair<int, int> zoomPoint = identifyCenterOfTileOfDetail(detail_score);
+    if (detail_score == 0) {
+        // Nothing interesting on screen (e.g. inside the set), back out
+        fractalis->zoom(zoom_out_change(s.zoom_factor));
     } else {
-        fractalis->zoom(ZOOM_CONSTANT/1.5L);
-        panned = false;
+        initiatePan(zoomPoint.first, zoomPoint.second);
+        fractalis->zoom(zoom_in_change(s.zoom_factor));
     }
-    const uint8_t sleep_s = 1;
-    skip_counter = (1000/UPDATE_SLEEP) * sleep_s;
 }
 
-std::pair<int, int> AutoZoom::identifyCenterOfTileOfDetail() {
-    int maxDetailScore = -1;
-    std::pair<int, int> centerOfHighDetail(0, 0);
+std::pair<int, int> AutoZoom::identifyCenterOfTileOfDetail(int& detail_score) {
+    int maxDetailScore = 0;
+    std::pair<int, int> centerOfHighDetail(state->screen_w / 2, state->screen_h / 2);
 
     int numTilesX = state->screen_w / TILE_SIZE;
     int numTilesY = state->screen_h / TILE_SIZE;
@@ -57,6 +98,7 @@ std::pair<int, int> AutoZoom::identifyCenterOfTileOfDetail() {
         }
     }
 
+    detail_score = maxDetailScore;
     return centerOfHighDetail;
 }
 
@@ -65,7 +107,7 @@ void AutoZoom::initiatePan(int x, int y) {
     double panY = (y - state->screen_h / 2) / static_cast<double>(state->screen_h) * PAN_CONSTANT;
 
     if (!this->randomized_start) {
-        const double max = 1.0;
+        const double max = 0.35;
         const double min = -max;
         float random_x = ((float) rand()) / (float) RAND_MAX;
         float random_y = ((float) rand()) / (float) RAND_MAX;
@@ -88,34 +130,30 @@ std::pair<int, int> AutoZoom::calculateCenter(int tileX, int tileY) {
     );
 }
 
+/**
+ * Sums up the color differences between neighboring pixels. With smooth coloring nearly all neighbors differ a
+ * little, so big jumps (and the border of the set) count the most.
+ */
 int AutoZoom::measureTileDetail(int tileX, int tileY) {
-    return countPixelChanges(tileX, tileY);
-}
+    static constexpr int MAX_DIFFERENCE = 256;
+    auto difference = [](const PixelState& a, const PixelState& b) {
+        if (!a.isValid() || !b.isValid()) return 0;
+        if (a.isInSet() && b.isInSet()) return 0;
+        if (a.isInSet() != b.isInSet()) return MAX_DIFFERENCE;
+        return std::min(std::abs(static_cast<int>(a.color) - static_cast<int>(b.color)), MAX_DIFFERENCE);
+    };
 
-int AutoZoom::countPixelChanges(int tileX, int tileY) {
-    int changeCount = 0;
+    int score = 0;
     int startX = tileX * TILE_SIZE;
     int startY = tileY * TILE_SIZE;
 
-    for (int y = 0; y < TILE_SIZE; ++y) {
-        for (int x = 0; x < TILE_SIZE; ++x) {
-            int currentX = startX + x;
-            int currentY = startY + y;
-
-            if (currentX >= state->screen_w || currentY >= state->screen_h) continue;
-
-            uint16_t currentIteration = state->pixelState[currentY][currentX].iteration;
-
-            if (x > 0) {
-                uint16_t leftIteration = state->pixelState[currentY][currentX - 1].iteration;
-                if (currentIteration != leftIteration) changeCount++;
-            }
-            if (y > 0) {
-                uint16_t topIteration = state->pixelState[currentY - 1][currentX].iteration;
-                if (currentIteration != topIteration) changeCount++;
-            }
+    for (int y = startY; y < std::min(startY + TILE_SIZE, state->screen_h); ++y) {
+        for (int x = startX; x < std::min(startX + TILE_SIZE, state->screen_w); ++x) {
+            const PixelState& current = state->pixelState[y][x];
+            if (x > startX) score += difference(current, state->pixelState[y][x - 1]);
+            if (y > startY) score += difference(current, state->pixelState[y - 1][x]);
         }
     }
 
-    return changeCount;
+    return score;
 }
