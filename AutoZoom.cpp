@@ -65,7 +65,7 @@ void AutoZoom::initiatePan(int x, int y) {
     double panY = (y - state->screen_h / 2) / static_cast<double>(state->screen_h) * PAN_CONSTANT;
 
     if (!this->randomized_start) {
-        const double max = 1.0;
+        const double max = 0.35;
         const double min = -max;
         float random_x = ((float) rand()) / (float) RAND_MAX;
         float random_y = ((float) rand()) / (float) RAND_MAX;

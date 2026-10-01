@@ -98,8 +98,7 @@ void Fractalis::calculate_pixel_double(int x, int y, int iter_limit) {
         state->pixelState[y][x].setSmoothIterationFloat(1.0f);
     }
 
-    state->pixelState[y][x].iteration = iteration;
-    state->pixelState[y][x].setIsComplete(true);
+    state->pixelState[y][x].setIterationAndComplete(iteration, true);
 }
 
 
@@ -131,8 +130,7 @@ void Fractalis::calculate_pixel_dd(int x, int y, int iter_limit) {
         state->pixelState[y][x].setSmoothIterationFloat(1.0f);
     }
 
-    state->pixelState[y][x].iteration = iteration;
-    state->pixelState[y][x].setIsComplete(true);
+    state->pixelState[y][x].setIterationAndComplete(iteration, true);
 }
 
 void Fractalis::calculate_pixel(int x, int y, int iter_limit) {

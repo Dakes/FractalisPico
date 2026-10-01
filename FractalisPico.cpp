@@ -214,7 +214,7 @@ void render_fractal() {
         for(int x = start_x; x < end_x; ++x) {
             if (!state.pixelState[y][x].isComplete()) {
                 continue;
-            } else if (state.pixelState[y][x].iteration >= state.iteration_limit) {
+            } else if (state.pixelState[y][x].getIterationCount() >= state.iteration_limit) {
                 display.set_pen(0, 0, 0);
             } else {
                 float iteration_ratio = std::log(1 + state.pixelState[y][x].getSmoothIterationFloat()) / 2.0f;
