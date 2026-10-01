@@ -1,0 +1,255 @@
+#include "palette.h"
+#include "globals.h"
+#include <algorithm>
+#include <cmath>
+
+namespace palette {
+
+namespace {
+
+constexpr ColorStop ULTRA[] = {
+    {0.0000f,   0,   7, 100},
+    {0.1600f,  32, 107, 203},
+    {0.4200f, 237, 255, 255},
+    {0.6425f, 255, 170,   0},
+    {0.8575f,   0,   2,   0},
+};
+
+constexpr ColorStop FIRE[] = {
+    {0.00f,  10,   0,  20},
+    {0.25f, 150,  10,  30},
+    {0.50f, 255, 120,   0},
+    {0.70f, 255, 230, 120},
+    {0.85f, 120,  40,  20},
+};
+
+constexpr ColorStop OCEAN[] = {
+    {0.00f,   0,  10,  40},
+    {0.30f,   0,  90, 140},
+    {0.55f,  60, 220, 210},
+    {0.70f, 240, 255, 250},
+    {0.85f,  20,  60, 110},
+};
+
+constexpr ColorStop NEON[] = {
+    {0.00f,  20,   0,  60},
+    {0.25f, 160,   0, 200},
+    {0.50f, 255,  40, 140},
+    {0.70f, 255, 200,  60},
+    {0.85f,   0, 200, 255},
+};
+
+constexpr Definition PALETTES[] = {
+    {"Classic", nullptr, 0, 1.0f, START_HUE},  // the original HSV rainbow
+    {"Ultra", ULTRA, sizeof(ULTRA) / sizeof(ULTRA[0]), 1.0f, 0.0f},
+    {"Fire", FIRE, sizeof(FIRE) / sizeof(FIRE[0]), 1.0f, 0.0f},
+    {"Ocean", OCEAN, sizeof(OCEAN) / sizeof(OCEAN[0]), 1.0f, 0.0f},
+    {"Neon", NEON, sizeof(NEON) / sizeof(NEON[0]), 1.0f, 0.0f},
+};
+constexpr int PALETTE_COUNT = sizeof(PALETTES) / sizeof(PALETTES[0]);
+
+// Auto contrast: number of palette cycles between the 1st and 99th percentile of the values on screen
+constexpr float CYCLES_PER_SCREEN = 2.0f;
+constexpr float MIN_CYCLES = 0.5f;   // per unit of t
+constexpr float MAX_CYCLES = 400.0f;
+constexpr float TRANSITION_SPEED = 0.2f;  // fraction per frame
+
+// Far away from the set the colors fade in from black
+constexpr uint32_t FADE_IN_END = static_cast<uint32_t>(VALUE_THRESHOLD * (1 << POSITION_BITS));
+
+// Relief shading: light from the top left
+constexpr float LIGHT_X = -0.70710678f;
+constexpr float LIGHT_Y = -0.70710678f;
+constexpr float LIGHT_HEIGHT = 1.2f;  // higher = softer shading
+constexpr float AMBIENT = 0.25f;
+
+uint16_t pack565(float r, float g, float b) {
+    auto c = [](float v) { return static_cast<uint16_t>(std::max(0.0f, std::min(v, 255.0f))); };
+    return static_cast<uint16_t>(((c(r) & 0xF8) << 8) | ((c(g) & 0xFC) << 3) | (c(b) >> 3));
+}
+
+uint16_t hsv(float h, float s, float v) {
+    h = h - std::floor(h);
+    float i = std::floor(h * 6.0f);
+    float f = h * 6.0f - i;
+    v *= 255.0f;
+    float p = v * (1.0f - s);
+    float q = v * (1.0f - f * s);
+    float t = v * (1.0f - (1.0f - f) * s);
+    switch (static_cast<int>(i) % 6) {
+        case 0: return pack565(v, t, p);
+        case 1: return pack565(q, v, p);
+        case 2: return pack565(p, v, t);
+        case 3: return pack565(p, q, v);
+        case 4: return pack565(t, p, v);
+        default: return pack565(v, p, q);
+    }
+}
+
+// Smooth (cosine) interpolation between cyclic color stops
+uint16_t gradient(const Definition& def, float x) {
+    x = x - std::floor(x);
+    int n = def.stop_count;
+    int next = 0;
+    while (next < n && def.stops[next].position <= x) next++;
+    const ColorStop& a = def.stops[(next + n - 1) % n];
+    const ColorStop& b = def.stops[next % n];
+    float start = a.position;
+    float end = b.position;
+    if (end <= start) end += 1.0f;
+    float xx = x < start ? x + 1.0f : x;
+    float f = (xx - start) / (end - start);
+    f = 0.5f - 0.5f * std::cos(f * 3.14159265f);
+    return pack565(a.r + (b.r - a.r) * f, a.g + (b.g - a.g) * f, a.b + (b.b - a.b) * f);
+}
+
+}  // namespace
+
+uint32_t position(float smooth_iteration) {
+    float t = std::log(1.0f + std::max(smooth_iteration, 0.0f)) / 2.0f;
+    float pos = t * static_cast<float>(1 << POSITION_BITS);
+    return static_cast<uint32_t>(std::min(pos, 16777215.0f));
+}
+
+Palette::Palette()
+    : current(0), phase_offset(0), range_start(0.0f), cycles(1.0f), target_range_start(0.0f), target_cycles(1.0f),
+      lut_step(0) {
+    select(0);
+}
+
+void Palette::update_lut_step() {
+    float c = cycles * PALETTES[current].cycles;
+    lut_step = static_cast<uint32_t>(c * LUT_SIZE * 65536.0f / (1 << POSITION_BITS));
+}
+
+void Palette::analyze(PixelState* const* pixels, int width, int height) {
+    uint32_t lowest = UINT32_MAX, highest = 0;
+    int count = 0;
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            const PixelState& p = pixels[y][x];
+            if (!p.hasPosition()) continue;
+            uint32_t pos = p.position();
+            lowest = std::min(lowest, pos);
+            highest = std::max(highest, pos);
+            count++;
+        }
+    }
+    if (count < 16 || highest <= lowest) return;
+
+    // Percentiles from a histogram, so a few extreme pixels don't dominate
+    constexpr int BINS = 256;
+    uint32_t histogram[BINS] = {};
+    float bin_size = static_cast<float>(highest - lowest + 1) / BINS;
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            const PixelState& p = pixels[y][x];
+            if (!p.hasPosition()) continue;
+            int bin = static_cast<int>((p.position() - lowest) / bin_size);
+            histogram[std::min(bin, BINS - 1)]++;
+        }
+    }
+    int low_bin = 0, high_bin = BINS - 1;
+    for (int sum = 0; low_bin < BINS - 1 && (sum += histogram[low_bin]) < count / 100; ++low_bin) {}
+    for (int sum = 0; high_bin > 0 && (sum += histogram[high_bin]) < count / 100; --high_bin) {}
+    float low = lowest + low_bin * bin_size;
+    float high = lowest + (high_bin + 1) * bin_size;
+
+    float range_t = (high - low) / (1 << POSITION_BITS);
+    target_range_start = low;
+    target_cycles = std::max(MIN_CYCLES, std::min(CYCLES_PER_SCREEN / std::max(range_t, 1e-6f), MAX_CYCLES));
+}
+
+bool Palette::animate() {
+    bool changing = false;
+    float scale = (1 << POSITION_BITS) / std::max(cycles, target_cycles);
+    if (std::fabs(target_range_start - range_start) > scale * 0.002f) {
+        range_start += (target_range_start - range_start) * TRANSITION_SPEED;
+        changing = true;
+    } else {
+        range_start = target_range_start;
+    }
+    float ratio = target_cycles / cycles;
+    if (std::fabs(ratio - 1.0f) > 0.002f) {
+        cycles *= std::pow(ratio, TRANSITION_SPEED);
+        changing = true;
+    } else {
+        cycles = target_cycles;
+    }
+    update_lut_step();
+    return changing;
+}
+
+void Palette::select(int index) {
+    current = ((index % PALETTE_COUNT) + PALETTE_COUNT) % PALETTE_COUNT;
+    const Definition& def = PALETTES[current];
+    for (int i = 0; i < LUT_SIZE; ++i) {
+        float x = static_cast<float>(i) / LUT_SIZE + def.offset;
+        lut[i] = def.stop_count == 0 ? hsv(x, 1.0f, 1.0f) : gradient(def, x);
+    }
+    update_lut_step();
+}
+
+void Palette::next() {
+    select(current + 1);
+}
+
+const char* Palette::name() const {
+    return PALETTES[current].name;
+}
+
+void Palette::set_phase(float phase) {
+    phase = phase - std::floor(phase);
+    phase_offset = static_cast<uint32_t>(phase * LUT_SIZE * 65536.0f);
+}
+
+void Palette::render(PixelState* const* pixels, int width, int height, uint16_t* frame_buffer) const {
+    const int64_t start = static_cast<int64_t>(range_start);
+    for (int y = 0; y < height; ++y) {
+        const PixelState* row = pixels[y];
+        const PixelState* below = pixels[y + 1 < height ? y + 1 : y - 1];
+        float dir_y = y + 1 < height ? 1.0f : -1.0f;
+        uint16_t* out = frame_buffer + y * width;
+
+        for (int x = 0; x < width; ++x) {
+            const PixelState& p = row[x];
+            if (!p.showsColor()) {
+                out[x] = 0;
+                continue;
+            }
+            uint32_t pos = p.position();
+            int64_t relative = static_cast<int64_t>(pos) - start;
+            uint32_t index = static_cast<uint32_t>((relative * lut_step + phase_offset) >> 16);
+            uint16_t c = lut[index & (LUT_SIZE - 1)];
+
+            float brightness = pos < FADE_IN_END ? static_cast<float>(pos) / FADE_IN_END : 1.0f;
+
+            if (shading) {
+                // Slope of the smooth iteration count towards the right and bottom neighbor.
+                // Only its direction matters, which makes the relief look the same at every zoom level.
+                const PixelState& right = row[x + 1 < width ? x + 1 : x - 1];
+                float dir_x = x + 1 < width ? 1.0f : -1.0f;
+                float gx = right.showsColor() ? dir_x * (static_cast<float>(right.position()) - pos) : 0.0f;
+                float gy = below[x].showsColor() ? dir_y * (static_cast<float>(below[x].position()) - pos) : 0.0f;
+                float length_sq = gx * gx + gy * gy;
+                if (length_sq > 0.0f) {
+                    float d = (gx * LIGHT_X + gy * LIGHT_Y) / std::sqrt(length_sq);
+                    float light = (d + LIGHT_HEIGHT) / (1.0f + LIGHT_HEIGHT);
+                    brightness *= AMBIENT + (1.0f - AMBIENT) * light;
+                }
+            }
+
+            if (brightness < 0.999f) {
+                uint32_t scale = static_cast<uint32_t>(brightness * 256.0f);
+                uint32_t r = ((c >> 11) * scale) >> 8;
+                uint32_t g = (((c >> 5) & 0x3F) * scale) >> 8;
+                uint32_t b = ((c & 0x1F) * scale) >> 8;
+                c = static_cast<uint16_t>((r << 11) | (g << 5) | b);
+            }
+            // The display expects big endian
+            out[x] = static_cast<uint16_t>((c >> 8) | (c << 8));
+        }
+    }
+}
+
+}  // namespace palette

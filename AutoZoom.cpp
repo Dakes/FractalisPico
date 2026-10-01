@@ -2,39 +2,59 @@
 #include "globals.h"
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 
 AutoZoom::AutoZoom(FractalisState* state, Fractalis* fractalis)
-    : state(state), fractalis(fractalis) {
-        this->randomized_start = false;
+    : state(state), fractalis(fractalis), randomized_start(false), panned(false), next_step_ms(0) {}
+
+void AutoZoom::start() {
+    // A random first step only from the overview, otherwise every dive would look the same
+    randomized_start = state->zoom_factor >= 2.0;
+    panned = false;
+    next_step_ms = 0;
+}
+
+void AutoZoom::dive(uint32_t now_ms) {
+    if (!state->auto_zoom) {
+        next_step_ms = 0;
+        return;
     }
+    // Pause after every finished calculation
+    if (next_step_ms == 0) {
+        next_step_ms = now_ms + PAUSE_MS;
+        return;
+    }
+    if (static_cast<int32_t>(now_ms - next_step_ms) < 0) {
+        return;
+    }
+    next_step_ms = 0;
 
-void AutoZoom::dive() {
-    static bool panned = false;
-    static uint16_t skip_counter = 0;
-    if (!state->auto_zoom) return;
-    state->skip_pre_render = true;
-
-    if (skip_counter > 0) {
-        skip_counter--;
+    if (state->zoom_factor >= MAX_ZOOM) {
+        printf("Auto zoom reached max zoom, stopping\n");
+        state->auto_zoom = false;
+        state->needs_redraw = true;
         return;
     }
 
-
-    std::pair<int, int> zoomPoint = identifyCenterOfTileOfDetail();
-    if (!panned) {
+    int detail_score;
+    std::pair<int, int> zoomPoint = identifyCenterOfTileOfDetail(detail_score);
+    if (detail_score == 0) {
+        // Nothing interesting on screen (e.g. inside the set), back out
+        fractalis->zoom(-ZOOM_CONSTANT);
+        panned = false;
+    } else if (!panned) {
         initiatePan(zoomPoint.first, zoomPoint.second);
         panned = true;
     } else {
-        fractalis->zoom(ZOOM_CONSTANT/1.5L);
+        fractalis->zoom(ZOOM_CONSTANT / 1.5);
         panned = false;
     }
-    const uint8_t sleep_s = 1;
-    skip_counter = (1000/UPDATE_SLEEP) * sleep_s;
 }
 
-std::pair<int, int> AutoZoom::identifyCenterOfTileOfDetail() {
-    int maxDetailScore = -1;
-    std::pair<int, int> centerOfHighDetail(0, 0);
+std::pair<int, int> AutoZoom::identifyCenterOfTileOfDetail(int& detail_score) {
+    int maxDetailScore = 0;
+    std::pair<int, int> centerOfHighDetail(state->screen_w / 2, state->screen_h / 2);
 
     int numTilesX = state->screen_w / TILE_SIZE;
     int numTilesY = state->screen_h / TILE_SIZE;
@@ -57,6 +77,7 @@ std::pair<int, int> AutoZoom::identifyCenterOfTileOfDetail() {
         }
     }
 
+    detail_score = maxDetailScore;
     return centerOfHighDetail;
 }
 
@@ -88,34 +109,30 @@ std::pair<int, int> AutoZoom::calculateCenter(int tileX, int tileY) {
     );
 }
 
+/**
+ * Sums up the color differences between neighboring pixels. With smooth coloring nearly all neighbors differ a
+ * little, so big jumps (and the border of the set) count the most.
+ */
 int AutoZoom::measureTileDetail(int tileX, int tileY) {
-    return countPixelChanges(tileX, tileY);
-}
+    static constexpr int MAX_DIFFERENCE = 256;
+    auto difference = [](const PixelState& a, const PixelState& b) {
+        if (!a.isComplete() || !b.isComplete()) return 0;
+        if (a.isInSet() && b.isInSet()) return 0;
+        if (a.isInSet() != b.isInSet()) return MAX_DIFFERENCE;
+        return std::min(std::abs(static_cast<int>(a.color) - static_cast<int>(b.color)), MAX_DIFFERENCE);
+    };
 
-int AutoZoom::countPixelChanges(int tileX, int tileY) {
-    int changeCount = 0;
+    int score = 0;
     int startX = tileX * TILE_SIZE;
     int startY = tileY * TILE_SIZE;
 
-    for (int y = 0; y < TILE_SIZE; ++y) {
-        for (int x = 0; x < TILE_SIZE; ++x) {
-            int currentX = startX + x;
-            int currentY = startY + y;
-
-            if (currentX >= state->screen_w || currentY >= state->screen_h) continue;
-
-            uint16_t currentIteration = state->pixelState[currentY][currentX].iteration;
-
-            if (x > 0) {
-                uint16_t leftIteration = state->pixelState[currentY][currentX - 1].iteration;
-                if (currentIteration != leftIteration) changeCount++;
-            }
-            if (y > 0) {
-                uint16_t topIteration = state->pixelState[currentY - 1][currentX].iteration;
-                if (currentIteration != topIteration) changeCount++;
-            }
+    for (int y = startY; y < std::min(startY + TILE_SIZE, state->screen_h); ++y) {
+        for (int x = startX; x < std::min(startX + TILE_SIZE, state->screen_w); ++x) {
+            const PixelState& current = state->pixelState[y][x];
+            if (x > startX) score += difference(current, state->pixelState[y][x - 1]);
+            if (y > startY) score += difference(current, state->pixelState[y - 1][x]);
         }
     }
 
-    return changeCount;
+    return score;
 }

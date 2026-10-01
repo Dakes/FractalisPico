@@ -16,15 +16,22 @@ cmake_minimum_required(VERSION 3.12)
 
 set(PICO_BOARD pico2 CACHE STRING "Board type")
 
-# Set PICO_SDK_PATH if not defined
-if(NOT DEFINED ENV{PICO_SDK_PATH})
-    set(ENV{PICO_SDK_PATH} "${CMAKE_CURRENT_LIST_DIR}/pico-sdk")
-endif()
-
 # Set PIMORONI_PICO_PATH directly in CMake
 set(PIMORONI_PICO_PATH "${CMAKE_CURRENT_LIST_DIR}/pimoroni-pico" CACHE PATH "Path to the Pimoroni Pico libraries")
-# set(PICO_SDK_PATH "${CMAKE_CURRENT_LIST_DIR}/pico-sdk" CACHE PATH "Path to the Pico sdk")
-set(PICO_SDK_PATH ${USERHOME}/.pico-sdk CACHE PATH "Path to the Pico sdk")
+
+# Pico SDK: -DPICO_SDK_PATH, the VS Code extension or $PICO_SDK_PATH, otherwise the pico-sdk submodule
+if(PICO_SDK_PATH AND NOT EXISTS "${PICO_SDK_PATH}/pico_sdk_init.cmake")
+    message(WARNING "No Pico SDK found at ${PICO_SDK_PATH}, ignoring it")
+    unset(PICO_SDK_PATH)
+    unset(PICO_SDK_PATH CACHE)
+endif()
+if(NOT PICO_SDK_PATH)
+    if(DEFINED ENV{PICO_SDK_PATH})
+        set(PICO_SDK_PATH $ENV{PICO_SDK_PATH})
+    else()
+        set(PICO_SDK_PATH "${CMAKE_CURRENT_LIST_DIR}/pico-sdk")
+    endif()
+endif()
 
 # Change your executable name to something creative!
 set(NAME FractalisPico)
@@ -47,6 +54,7 @@ add_executable(${NAME}
     FractalisState.cpp
     fractalis.cpp
     AutoZoom.cpp
+    palette.cpp
 )
 
 # Include required libraries
@@ -90,6 +98,10 @@ target_link_libraries(${NAME}
     rgbled
     button
     st7789
+)
+
+target_compile_options(${NAME} PRIVATE
+    $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wno-psabi>
 )
 
 # Enable floating-point support in printf functions
