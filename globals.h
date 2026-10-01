@@ -34,6 +34,8 @@
 #ifndef DOUBLE_MAX_ZOOM
 #define DOUBLE_MAX_ZOOM 5e11
 #endif
+// Beyond this even DoubleDouble runs out of precision and pixels become blocky
+#define DOUBLE_DOUBLE_MAX_ZOOM 1e27
 // Above this zoom level the main cardioid/bulb check and periodicity checks are not precise enough
 #define OPTIMIZATIONS_MAX_ZOOM 1e7
 // Every calculation starts with a low iteration limit, which doubles with every pass

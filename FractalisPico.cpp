@@ -284,7 +284,7 @@ void render_overlay() {
 
     // Enough decimals to tell neighboring pixels apart
     double pixel_size = 4.0 / state.zoom_factor / state.screen_w;
-    int decimals = std::max(6, std::min(30, static_cast<int>(std::ceil(-std::log10(pixel_size))) + 1));
+    int decimals = std::max(6, std::min(32, static_cast<int>(std::ceil(-std::log10(pixel_size))) + 1));
     char real_text[48];
     char imag_text[48];
     format_coordinate(state.center.real, decimals, real_text, sizeof(real_text));
@@ -307,7 +307,9 @@ void render_overlay() {
 
     info_y += font8_height + margin;
     const char* precision = state.zoom_factor < FLOAT_MAX_ZOOM ? "float"
-                          : state.zoom_factor < DOUBLE_MAX_ZOOM ? "double" : "double-double";
+                          : state.zoom_factor < DOUBLE_MAX_ZOOM ? "double"
+                          : state.zoom_factor < DOUBLE_DOUBLE_MAX_ZOOM ? "double-double"
+                          : "past precision limit!";
     char iterations_text[48];
     snprintf(iterations_text, sizeof(iterations_text), "Iterations: %d (%s)", state.iteration_limit, precision);
     draw_text(iterations_text, Point(margin, info_y), scale);
