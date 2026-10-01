@@ -204,12 +204,17 @@ void Palette::set_phase(float phase) {
 }
 
 void Palette::render(PixelState* const* pixels, int width, int height, uint16_t* frame_buffer) const {
+    render_rows(pixels, width, height, 0, height, frame_buffer);
+}
+
+void Palette::render_rows(PixelState* const* pixels, int width, int height, int first_row, int rows,
+                          uint16_t* out_rows) const {
     const int64_t start = static_cast<int64_t>(range_start);
-    for (int y = 0; y < height; ++y) {
+    for (int y = first_row; y < first_row + rows; ++y) {
         const PixelState* row = pixels[y];
         const PixelState* below = pixels[y + 1 < height ? y + 1 : y - 1];
         float dir_y = y + 1 < height ? 1.0f : -1.0f;
-        uint16_t* out = frame_buffer + y * width;
+        uint16_t* out = out_rows + (y - first_row) * width;
 
         for (int x = 0; x < width; ++x) {
             const PixelState& p = row[x];

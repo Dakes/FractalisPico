@@ -16,7 +16,11 @@
 #include "globals.h"
 #include "palette.h"
 #include "doubledouble.h"
+#include "StripDisplay.hpp"
 #include <cmath>
+#include <cstring>
+#include <malloc.h>
+#include <unistd.h>
 
 using namespace pimoroni;
 using namespace doubledouble;
@@ -26,8 +30,8 @@ const uint16_t width = 320;
 const uint16_t height = 240;
 
 ST7789 st7789(width, height, ROTATE_0, false, get_spi_pins(BG_SPI_FRONT));
-// RGB565 for smooth color gradients (RGB332 only has 256 colors)
-PicoGraphics_PenRGB565 display(st7789.width, st7789.height, nullptr);
+// RGB565 for smooth color gradients (RGB332 only has 256 colors), drawn in strips instead of a full frame buffer
+StripDisplay display(st7789.width, st7789.height, get_spi_pins(BG_SPI_FRONT).spi);
 RGBLED led(PicoDisplay::LED_R, PicoDisplay::LED_G, PicoDisplay::LED_B);
 Button button_a(PicoDisplay::A);
 Button button_b(PicoDisplay::B);
@@ -57,6 +61,7 @@ bool overlay_visible = false;
 
 void core1_entry();
 void update_display();
+void draw_strip(uint16_t* strip, int first_row, int rows);
 void update_led();
 void render_overlay();
 void handle_input();
@@ -66,6 +71,14 @@ bool sample_buttons(repeating_timer_t*);
 
 uint32_t now_ms() {
     return to_ms_since_boot(get_absolute_time());
+}
+
+extern char __StackLimit;  // end of the heap, set by the linker
+
+// Never touched heap plus freed blocks inside the used heap
+unsigned free_ram() {
+    char* heap_end = static_cast<char*>(sbrk(0));
+    return static_cast<unsigned>(&__StackLimit - heap_end) + mallinfo().fordblks;
 }
 
 bool overlay_wanted() {
@@ -82,11 +95,11 @@ void set_clock() {
 
 int main() {
     set_clock();
-    // Clear the display RAM before anything else, it is filled with noise after power up
-    display.set_pen(0, 0, 0);
-    display.clear();
+    // Clear the display RAM before anything else, it is filled with noise after power up.
+    // Without a draw callback yet, the display draws black.
     st7789.update(&display);
     st7789.set_backlight(255);
+    display.set_drawer(draw_strip);
 
     if (DEBUG) {
         stdio_init_all();
@@ -102,7 +115,7 @@ int main() {
     printf("Display initialized\n");
 
     fractalis.reset_view();
-    printf("Fractal state initialized\n");
+    printf("Fractal state initialized, free RAM: %u KB\n", free_ram() / 1024);
 
     add_repeating_timer_ms(-BUTTON_SAMPLE_MS, sample_buttons, nullptr, &button_timer);
 
@@ -185,21 +198,54 @@ void help_calculating() {
     }
 }
 
+// The overlay texts of the current frame. Collected once per frame, then drawn into every strip they touch.
+struct OverlayText {
+    char text[120];
+    Point position;
+    const bitmap::font_t* font;
+    int scale;
+    int height;  // incl. all lines and the shadow
+};
+constexpr int MAX_OVERLAY_TEXTS = 12;
+OverlayText overlay_texts[MAX_OVERLAY_TEXTS];
+int overlay_text_count = 0;
+
 void update_display() {
     state.needs_redraw = false;
-    color_palette.render(state.pixelState, state.screen_w, state.screen_h, static_cast<uint16_t*>(display.frame_buffer));
     overlay_visible = overlay_wanted();
+    overlay_text_count = 0;
     if (overlay_visible)
         render_overlay();
-    st7789.update(&display);
+    st7789.update(&display);  // calls draw_strip() for every strip
 }
 
-// White text with a dark shadow, so it is readable on bright colors as well
+void draw_strip(uint16_t* strip, int first_row, int rows) {
+    color_palette.render_rows(state.pixelState, state.screen_w, state.screen_h, first_row, rows, strip);
+    for (int i = 0; i < overlay_text_count; ++i) {
+        const OverlayText& t = overlay_texts[i];
+        if (t.position.y >= first_row + rows || t.position.y + t.height <= first_row)
+            continue;
+        // White text with a dark shadow, so it is readable on bright colors as well
+        display.set_font(t.font);
+        display.set_pen(0, 0, 0);
+        display.text(t.text, Point(t.position.x + 1, t.position.y + 1), display.bounds.w, t.scale);
+        display.set_pen(255, 255, 255);
+        display.text(t.text, t.position, display.bounds.w, t.scale);
+    }
+}
+
+// Adds a text to the overlay of this frame, in the current font
 void draw_text(const char* text, Point position, int scale) {
-    display.set_pen(0, 0, 0);
-    display.text(text, Point(position.x + 1, position.y + 1), display.bounds.w, scale);
-    display.set_pen(255, 255, 255);
-    display.text(text, position, display.bounds.w, scale);
+    if (overlay_text_count >= MAX_OVERLAY_TEXTS)
+        return;
+    OverlayText& t = overlay_texts[overlay_text_count++];
+    snprintf(t.text, sizeof(t.text), "%s", text);
+    t.position = position;
+    t.font = display.bitmap_font;
+    t.scale = scale;
+    int lines = 1;
+    for (const char* c = text; *c; ++c) lines += *c == '\n';
+    t.height = lines * t.font->height * scale + 1;
 }
 
 /**

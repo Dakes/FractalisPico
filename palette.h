@@ -59,6 +59,9 @@ public:
      * Draws the pixel state into an RGB565 frame buffer (in display byte order).
      */
     void render(PixelState* const* pixels, int width, int height, uint16_t* frame_buffer) const;
+    // Only the rows first_row .. first_row + rows - 1, into a buffer of that many rows
+    void render_rows(PixelState* const* pixels, int width, int height, int first_row, int rows,
+                     uint16_t* out_rows) const;
 
 private:
     int current;
