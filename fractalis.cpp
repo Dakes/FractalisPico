@@ -254,10 +254,7 @@ void Fractalis::start_pass() {
 
     int target = max_iterations(state->zoom_factor);
     int first;
-    if (state->auto_zoom) {
-        // Auto zoom doesn't need to watch the details appear, it goes straight for the full limit
-        first = target;
-    } else if (first_limit_hint > 0) {
+    if (first_limit_hint > 0) {
         // Most pixels escape around the hint, lower passes would only show the preview again
         first = std::max(FIRST_PASS_ITER, std::min(first_limit_hint, target));
         if (first * 3 / 2 >= target) first = target;
@@ -341,6 +338,7 @@ void Fractalis::finish_pass() {
         }
     }
 
+    state->completed_limit = static_cast<uint16_t>(pass_limit);
     if (next_limit) {
         begin_pass(next_limit, pass_target);
     } else {
@@ -421,6 +419,7 @@ bool Fractalis::work(bool (*interrupt)()) {
 }
 
 void Fractalis::request_calculation() {
+    state->completed_limit = 0;
     state->calculating = 1;
     state->calculation_id++;
     state->needs_redraw = true;

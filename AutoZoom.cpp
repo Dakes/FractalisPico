@@ -5,24 +5,49 @@
 #include <cstdio>
 #include <cstdlib>
 
+const AutoZoom::Speed AutoZoom::SPEEDS[] = {
+    {"x1.05", 1.05, 500, 1.0f},
+    {"x1.1", 1.1, 500, 1.0f},
+    {"x1.25", 1.25, 500, 1.0f},
+    {"x1.5", 1.5, 500, 1.0f},
+    {"x2", 2.0, 500, 1.0f},
+    {"fly", 1.04, 0, 0.25f},  // continuous: every frame finishes, but with less detail
+};
+const int AutoZoom::SPEED_COUNT = sizeof(SPEEDS) / sizeof(SPEEDS[0]);
+
 AutoZoom::AutoZoom(FractalisState* state, Fractalis* fractalis)
-    : state(state), fractalis(fractalis), randomized_start(false), panned(false), next_step_ms(0) {}
+    : state(state), fractalis(fractalis), randomized_start(false), next_step_ms(0), speed(1) {}
+
+// zoom() takes the relative change, e.g. 0.1 for x1.1
+static double zoom_in_change(double factor) { return factor - 1.0; }
+static double zoom_out_change(double factor) { return 1.0 / factor - 1.0; }
 
 void AutoZoom::start() {
     // A random first step only from the overview, otherwise every dive would look the same
     randomized_start = state->zoom_factor >= 2.0;
-    panned = false;
     next_step_ms = 0;
 }
 
-void AutoZoom::dive(uint32_t now_ms) {
-    if (!state->auto_zoom) {
+void AutoZoom::next_speed() {
+    speed = (speed + 1) % SPEED_COUNT;
+    next_step_ms = 0;
+}
+
+const char* AutoZoom::speed_name() const {
+    return SPEEDS[speed].name;
+}
+
+void AutoZoom::dive(uint32_t now_ms, bool calculating) {
+    const Speed& s = SPEEDS[speed];
+    int needed_limit = static_cast<int>(s.detail * fractalis->max_iterations(state->zoom_factor));
+    bool ready = !calculating || (s.detail < 1.0f && state->completed_limit >= needed_limit);
+    if (!state->auto_zoom || !ready) {
         next_step_ms = 0;
         return;
     }
-    // Pause after every finished calculation
+    // Pause before every step
     if (next_step_ms == 0) {
-        next_step_ms = now_ms + PAUSE_MS;
+        next_step_ms = now_ms + s.pause_ms;
         return;
     }
     if (static_cast<int32_t>(now_ms - next_step_ms) < 0) {
@@ -41,14 +66,10 @@ void AutoZoom::dive(uint32_t now_ms) {
     std::pair<int, int> zoomPoint = identifyCenterOfTileOfDetail(detail_score);
     if (detail_score == 0) {
         // Nothing interesting on screen (e.g. inside the set), back out
-        fractalis->zoom(-ZOOM_CONSTANT);
-        panned = false;
-    } else if (!panned) {
-        initiatePan(zoomPoint.first, zoomPoint.second);
-        panned = true;
+        fractalis->zoom(zoom_out_change(s.zoom_factor));
     } else {
-        fractalis->zoom(ZOOM_CONSTANT / 1.5);
-        panned = false;
+        initiatePan(zoomPoint.first, zoomPoint.second);
+        fractalis->zoom(zoom_in_change(s.zoom_factor));
     }
 }
 
@@ -116,7 +137,7 @@ std::pair<int, int> AutoZoom::calculateCenter(int tileX, int tileY) {
 int AutoZoom::measureTileDetail(int tileX, int tileY) {
     static constexpr int MAX_DIFFERENCE = 256;
     auto difference = [](const PixelState& a, const PixelState& b) {
-        if (!a.isComplete() || !b.isComplete()) return 0;
+        if (!a.isValid() || !b.isValid()) return 0;
         if (a.isInSet() && b.isInSet()) return 0;
         if (a.isInSet() != b.isInSet()) return MAX_DIFFERENCE;
         return std::min(std::abs(static_cast<int>(a.color) - static_cast<int>(b.color)), MAX_DIFFERENCE);

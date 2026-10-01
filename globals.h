@@ -18,6 +18,7 @@
 #define BUTTON_SAMPLE_MS 2
 #define BUTTON_DEBOUNCE_SAMPLES 4
 #define LONG_PRESS_MS 350
+#define DOUBLE_TAP_MS 300        // A tap followed by a press within this time selects the second function layer
 #define REPEAT_MS 250            // Repeat interval of long press actions while the button is held
 
 #define PAN_CONSTANT 0.1

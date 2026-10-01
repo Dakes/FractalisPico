@@ -77,6 +77,8 @@ public:
     volatile uint16_t iteration_limit;
     // Incremented whenever a calculation pass finished
     volatile uint32_t passes_completed;
+    // Iteration limit of the last pass that covered the whole screen for the current view. 0 = none yet
+    volatile uint16_t completed_limit;
 
 private:
     PixelState* row_buffer;
