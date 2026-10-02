@@ -26,16 +26,21 @@
 
 #define MAX_ITER 10000
 
-// Precision switches. Float is by far the fastest on the RP2350 (single precision FPU),
-// double is emulated with help of the DCP coprocessor, DoubleDouble is fully in software.
+// Precision switches. Float is by far the fastest on the RP2350 (single precision FPU), double is a good bit
+// slower (DCP coprocessor), DoubleDouble needs many double operations per step.
 #ifndef FLOAT_MAX_ZOOM
 #define FLOAT_MAX_ZOOM 1e4
 #endif
 #ifndef DOUBLE_MAX_ZOOM
 #define DOUBLE_MAX_ZOOM 5e11
 #endif
-// Beyond this even DoubleDouble runs out of precision and pixels become blocky
-#define DOUBLE_DOUBLE_MAX_ZOOM 1e27
+// Beyond this even DoubleDouble runs out of precision (~32 digits) and pixels become blocky
+#define DOUBLE_DOUBLE_MAX_ZOOM 1e31
+// From here up to DOUBLE_DOUBLE_MAX_ZOOM pixels are calculated with perturbation: in single precision relative to
+// a double-double reference orbit. Between FLOAT_MAX_ZOOM and this, pixels are calculated in double.
+#ifndef PERTURBATION_MIN_ZOOM
+#define PERTURBATION_MIN_ZOOM FLOAT_MAX_ZOOM
+#endif
 // Above this zoom level the main cardioid/bulb check and periodicity checks are not precise enough
 #define OPTIMIZATIONS_MAX_ZOOM 1e7
 // Every calculation starts with a low iteration limit, which doubles with every pass

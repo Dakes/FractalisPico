@@ -128,12 +128,23 @@ int main() {
     bool animating = false;
     float color_phase = 0.0f;
     uint32_t last_loop_ms = now_ms();
+    uint32_t seen_calculation = 0;
+    uint32_t calculation_started_ms = 0;
+    bool was_calculating = false;
     while(true) {
         update_led();
         handle_input();
 
         uint32_t now = now_ms();
         bool calculating = state.calculating != 0;
+        if (state.calculation_id != seen_calculation) {
+            seen_calculation = state.calculation_id;
+            calculation_started_ms = now;
+        }
+        if (was_calculating && !calculating) {
+            printf("View done in %lu ms\n", static_cast<unsigned long>(now - calculation_started_ms));
+        }
+        was_calculating = calculating;
 
         // Auto contrast after every finished pass
         if (state.passes_completed != seen_passes) {
@@ -353,8 +364,8 @@ void render_overlay() {
 
     info_y += font8_height + margin;
     const char* precision = state.zoom_factor < FLOAT_MAX_ZOOM ? "float"
-                          : state.zoom_factor < DOUBLE_MAX_ZOOM ? "double"
-                          : state.zoom_factor < DOUBLE_DOUBLE_MAX_ZOOM ? "double-double"
+                          : state.zoom_factor < PERTURBATION_MIN_ZOOM ? "double"
+                          : state.zoom_factor < DOUBLE_DOUBLE_MAX_ZOOM ? "perturbation"
                           : "past precision limit!";
     char iterations_text[48];
     snprintf(iterations_text, sizeof(iterations_text), "Iterations: %d (%s)", state.iteration_limit, precision);

@@ -17,6 +17,9 @@ using namespace doubledouble;
 class Fractalis {
 public:
     Fractalis(FractalisState* state);
+    ~Fractalis();
+    Fractalis(const Fractalis&) = delete;
+    Fractalis& operator=(const Fractalis&) = delete;
 
     /**
      * Calculates a few pixels of the current pass.
@@ -49,10 +52,53 @@ private:
         // Single precision copies for the float calculation. The center is split in a high and low part, so c is
         // only rounded once and doesn't depend on how the center was reached.
         float center_rf, center_rf_low, center_if, center_if_low, step_f;
+        // Perturbation: pixels iterate their difference to the reference orbit
+        bool perturbed;
+        double ref_offset_r, ref_offset_i;  // center - reference point
+        const float* orbit;
+        int orbit_length;
+        // Hyperbolic component (minibrot or bulb) the reference is in, pixels safely inside are in the set
+        bool minibrot;
+        double nucleus_offset_r, nucleus_offset_i;  // center - nucleus
+        bool cardioid;
+        double scale_r, scale_i;
+        // Everything this close to the reference is in the set (0 = unknown)
+        double interior_radius_sq;
+    };
+
+    /**
+     * Reference orbit for perturbation: Z_0 = 0, Z_n+1 = Z_n^2 + C, calculated in double-double and stored in
+     * single precision (re, im interleaved). It is calculated step by step up to the iteration limit of the pass
+     * and kept as long as C is on or near the screen, so zooming and panning usually don't need a new one.
+     */
+    struct Reference {
+        float* orbit;
+        int length;        // stored values
+        bool escaped;      // the orbit escaped at the last stored value and can't be extended
+        Coordinate c;
+        DoubleDouble zr, zi;  // last value, to continue the orbit
+        uint32_t generation;  // incremented when C changes
+        bool busy;            // a core is calculating the orbit (outside of the lock)
+        // C candidates of the current pass that escaped too early, in screen pixels
+        static constexpr int MAX_TRIES = 4;
+        int tries;
+        int16_t tried_x[MAX_TRIES], tried_y[MAX_TRIES];
+        int best_length;
+        Coordinate best_c;
+        // Component of the reference, see View
+        enum : uint8_t { MINIBROT_UNKNOWN, MINIBROT_FOUND, MINIBROT_NONE } minibrot;
+        int minibrot_tried_length;  // orbit length at the last search, it's tried again with a longer orbit
+        int period;
+        Coordinate nucleus;
+        bool component_check;  // the reference is safely inside the component, the check is worth it
+        bool cardioid;
+        double scale_r, scale_i;
+        double interior_radius;
     };
 
     FractalisState* state;
     Lock lock;
+    Reference ref;
 
     // Current pass, protected by the lock
     uint32_t pass_id;
@@ -79,6 +125,14 @@ private:
     bool claim_pixel(int& x, int& y);
     void store_result(int x, int y, const PixelState& result);
     void request_calculation();
+
+    bool reference_ready() const;
+    // Picks C for a new reference orbit: the undecided pixel closest to the center, else the slowest one to escape
+    void choose_reference();
+    void set_reference(const Coordinate& c);
+    // Calculates the reference orbit up to the iteration limit of the pass, without holding the lock
+    // Returns false if interrupted
+    bool extend_reference(uint32_t id, int target_length, bool (*interrupt)());
 
     // Returns false, if the calculation was aborted
     bool calculate_pixel(int x, int y, const View& view, int iter_limit, uint32_t id, bool (*interrupt)(),

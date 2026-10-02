@@ -3,6 +3,7 @@
 #include "palette.h"
 #include <algorithm>
 #include <cmath>
+#include <complex>
 #include <cstdio>
 
 namespace {
@@ -98,6 +99,186 @@ inline DD dd_mul(DD a, DD b) {
     return quick_two_sum(p, e + (a.hi * b.lo + a.lo * b.hi));
 }
 
+/**
+ * Minibrots are (almost) exact copies of the whole set, so the main cardioid/bulb check also works for them in
+ * minibrot coordinates (c - nucleus) / size. The copies are slightly distorted, so the check is done with a margin:
+ * the cardioid shrunk by 10% towards the nucleus and a smaller period 2 bulb. Pixels close to the border are
+ * calculated normally.
+ */
+bool is_safely_in_main_bulb(float x, float y) {
+    if (std::abs(x) > 1.5f || std::abs(y) > 1.0f) return false;
+    float sx = x * 1.1f - 0.25f, sy = y * 1.1f;
+    float q = sx * sx + sy * sy;
+    return q * (q + sx) <= 0.25f * sy * sy || (x + 1) * (x + 1) + y * y < 0.04f;
+}
+
+struct Minibrot {
+    int period;
+    bool usable;  // c is safely inside, so the check is worth it
+    double nr_hi, nr_lo, ni_hi, ni_lo;  // nucleus
+    bool cardioid;
+    double scale_r, scale_i;  // see is_in_component()
+};
+
+/**
+ * d = c - nucleus. Cardioids: d * scale is in the coordinates of the whole set (scale = 1 / size).
+ * Discs: d * scale is the multiplier of the cycle (to first order), the disc ends where it reaches 1. Only
+ * 0.3 is used, that's safe for any shape between disc and cardioid.
+ */
+bool is_in_component(bool cardioid, float x, float y) {
+    if (cardioid) return is_safely_in_main_bulb(x, y);
+    return x * x + y * y < 0.09f;
+}
+
+/**
+ * Finds the hyperbolic component (minibrot or bulb) that contains c, starting with a guess of its period (or a
+ * multiple of it): Newton's method for z_period(nucleus) = 0, then the size estimate by Claude Heiland-Allen:
+ *   size = 1 / (b * l^2),  l = prod 2 z_k,  b = sum 1 / l_k  over the nucleus orbit
+ * Returns false if it didn't converge. usable is false if c isn't safely inside, then the period is still valid.
+ */
+template <typename Interrupt>
+bool find_minibrot(DD cr, DD ci, int period, Minibrot& out, const Interrupt& interrupt) {
+    const DD c0r = cr, c0i = ci;
+    double last_step = INFINITY;
+    bool converged = false;
+    for (int step = 0; step < 12 && !converged; ++step) {
+        if (interrupt()) return false;
+        DD zr = {0, 0}, zi = {0, 0};
+        double dr = 0, di = 0;  // dz/dc
+        for (int i = 0; i < period; ++i) {
+            double ndr = 2 * (zr.hi * dr - zi.hi * di) + 1;
+            di = 2 * (zr.hi * di + zi.hi * dr);
+            dr = ndr;
+            DD zri = dd_mul(zr, zi);
+            DD nzr = dd_add(dd_sub(dd_mul(zr, zr), dd_mul(zi, zi)), cr);
+            zi = dd_add({zri.hi * 2, zri.lo * 2}, ci);
+            zr = nzr;
+            if (zr.hi * zr.hi + zi.hi * zi.hi > 4.0) return false;
+        }
+        double d = dr * dr + di * di;
+        if (!(d > 0) || !std::isfinite(d)) return false;
+        double sr = (zr.hi * dr + zi.hi * di) / d;
+        double si = (zi.hi * dr - zr.hi * di) / d;
+        cr = dd_sub(cr, {sr, 0});
+        ci = dd_sub(ci, {si, 0});
+        // |z_period| relative to the size of the minibrot ~ 1 / |dz/dc|
+        double step_size = std::sqrt((sr * sr + si * si) * d);
+        converged = step_size < 1e-6;
+        // Stuck at the precision limit or diverging
+        if (!converged && step_size > last_step * 0.5 && step > 2) break;
+        last_step = step_size;
+    }
+    if (!converged && last_step > 1e-3) return false;
+
+    // The actual period divides the guess: the first z_k of the nucleus orbit that is (almost) 0
+    double min_sq = INFINITY;
+    int actual = period;
+    {
+        DD zr, zi;
+        // first pass: the smallest |z_k|, second pass: the first k that is about as small
+        for (int pass = 0; pass < 2; ++pass) {
+            zr = zi = {0, 0};
+            for (int k = 1; k <= period; ++k) {
+                DD zri = dd_mul(zr, zi);
+                DD nzr = dd_add(dd_sub(dd_mul(zr, zr), dd_mul(zi, zi)), cr);
+                zi = dd_add({zri.hi * 2, zri.lo * 2}, ci);
+                zr = nzr;
+                double m = zr.hi * zr.hi + zi.hi * zi.hi;
+                if (pass == 0) {
+                    min_sq = std::min(min_sq, m);
+                } else if (period % k == 0 && m <= min_sq * 1e6) {
+                    actual = k;
+                    break;
+                }
+            }
+        }
+    }
+
+    // Size estimate and shape: a minibrot is a cardioid, but the bulbs attached to it are discs. Near the nucleus
+    // the multiplier of the cycle is lambda = alpha * d + beta * d^2 (d = c - nucleus). The discriminant
+    // e = beta / alpha^2 is 1/2 for a cardioid (like the main cardioid) and 0 for a disc (like the period 2 bulb).
+    // With z_p = A d + B d^2 and l = prod 2 z_k (k = 1 .. period - 1), l' = dl/dz_1:
+    //   e = 1/2 + (l B + l' A) / (2 l^2 A^2)
+    using complex = std::complex<double>;
+    complex l = 1, dl = 0, b = 1, a = 0, a2 = 0;
+    DD zr = {0, 0}, zi = {0, 0};
+    for (int k = 0; k < actual; ++k) {
+        complex z(zr.hi, zi.hi);
+        a2 = 2.0 * (a * a + z * a2);
+        a = 2.0 * z * a + 1.0;
+        if (k >= 1) {
+            dl = 2.0 * (l * l + z * dl);
+            l = 2.0 * z * l;
+            b += 1.0 / l;
+        }
+        DD zri = dd_mul(zr, zi);
+        DD nzr = dd_add(dd_sub(dd_mul(zr, zr), dd_mul(zi, zi)), cr);
+        zi = dd_add({zri.hi * 2, zri.lo * 2}, ci);
+        zr = nzr;
+    }
+    complex e = 0.5 + (l * (a2 * 0.5) + dl * a) / (2.0 * l * l * a * a);
+    out.cardioid = std::abs(e - 0.5) < 0.1;
+    complex scale = out.cardioid ? b * l * l : 2.0 * l * a;  // 1 / size, or alpha
+    if (!std::isfinite(scale.real()) || !std::isfinite(scale.imag()) || !std::isfinite(std::abs(e))) {
+        return false;
+    }
+    out.scale_r = scale.real();
+    out.scale_i = scale.imag();
+    out.period = actual;
+    out.nr_hi = cr.hi; out.nr_lo = cr.lo;
+    out.ni_hi = ci.hi; out.ni_lo = ci.lo;
+
+    // Only useful if the reference itself is inside
+    DD dcr = dd_sub(c0r, cr), dci = dd_sub(c0i, ci);
+    float x = static_cast<float>(dcr.hi * out.scale_r - dci.hi * out.scale_i);
+    float y = static_cast<float>(dcr.hi * out.scale_i + dci.hi * out.scale_r);
+    out.usable = is_in_component(out.cardioid, x, y);
+    return true;
+}
+
+/**
+ * Interior distance estimate: if c has an attracting cycle, every point closer than b / 4 to c is in the set as
+ * well (Koebe 1/4 theorem). With F = f^period at a point z of the cycle:
+ *   b = (1 - |F_z|^2) / |F_zc + F_zz F_c / (1 - F_z)|
+ * z starts at a point of the orbit close to the cycle and is refined with Newton's method for F(z) = z.
+ * Returns the radius (with a margin), 0 if there's no attracting cycle.
+ */
+template <typename Interrupt>
+double interior_radius(DD zr, DD zi, DD cr, DD ci, int period, const Interrupt& interrupt) {
+    using complex = std::complex<double>;
+    double last_step = INFINITY;
+    for (int step = 0; step < 10; ++step) {
+        if (interrupt()) return 0;
+        DD wr = zr, wi = zi;
+        complex fz = 1, fc = 0, fzz = 0, fzc = 0;
+        for (int i = 0; i < period; ++i) {
+            complex w(wr.hi, wi.hi);
+            fzz = 2.0 * (fz * fz + w * fzz);
+            fzc = 2.0 * (fz * fc + w * fzc);
+            fc = 2.0 * w * fc + 1.0;
+            fz = 2.0 * w * fz;
+            DD wri = dd_mul(wr, wi);
+            DD nwr = dd_add(dd_sub(dd_mul(wr, wr), dd_mul(wi, wi)), cr);
+            wi = dd_add({wri.hi * 2, wri.lo * 2}, ci);
+            wr = nwr;
+            if (wr.hi * wr.hi + wi.hi * wi.hi > 4.0) return 0;
+        }
+        if (!(std::abs(fz) < 1.0)) return 0;
+        complex g = complex(dd_sub(wr, zr).hi, dd_sub(wi, zi).hi);
+        complex delta = g / (fz - 1.0);
+        double step_size = std::abs(delta);
+        // Converged (as far as the precision goes): the derivatives at z are accurate enough
+        if (step_size < 1e-12 || (step_size > last_step * 0.5 && step_size < 1e-6)) {
+            double b = (1.0 - std::norm(fz)) / std::abs(fzc + fzz * fc / (1.0 - fz));
+            return std::isfinite(b) ? 0.9 * b / 4.0 : 0;
+        }
+        last_step = step_size;
+        zr = dd_sub(zr, {delta.real(), 0});
+        zi = dd_sub(zi, {delta.imag(), 0});
+    }
+    return 0;
+}
+
 template <typename Abort>
 Escape iterate_dd(DD cr, DD ci, int iter_limit, const Abort& abort) {
     DD zr = {0, 0}, zi = {0, 0}, zr2 = {0, 0}, zi2 = {0, 0};
@@ -119,11 +300,75 @@ Escape iterate_dd(DD cr, DD ci, int iter_limit, const Abort& abort) {
     return {iter_limit, 0.0f, true, false};
 }
 
+/**
+ * Perturbation: instead of z, only its difference dz to the reference orbit Z is iterated:
+ *   z = Z + dz,  dz' = (2Z + dz) * dz + dc
+ * dz and dc are tiny, but single precision keeps their relative precision at any zoom, so this runs on the fast
+ * float unit even where z itself would need double-double.
+ * Rebasing (Zhuoran): once |z| < |dz| or the reference ends, the pixel continues with dz = z from the start of the
+ * reference. That avoids the glitches where the pixel orbit drifts away from the reference.
+ * Periodicity check (Brent) on dz: z repeats when Z and dz repeat. Z repeats when the reference is caught in the
+ * same cycle (typically inside the same minibrot). dz has the full single precision even where z itself doesn't,
+ * it's only compared while small enough that its rounding stays far below epsilon.
+ */
+template <typename Abort>
+Escape iterate_perturbed(const float* orbit, int orbit_length, float dcr, float dci, int iter_limit, float epsilon,
+                         const Abort& abort) {
+    float dzr = 0, dzi = 0;
+    int m = 0;
+    float saved_zr = NAN, saved_zi = NAN, saved_dzr = 0, saved_dzi = 0;
+    int save_at = 8;
+    const float max_compared_dz = epsilon * 1e6f;
+    for (int n = 0; n < iter_limit; ++n) {
+        float ar = 2.0f * orbit[2 * m] + dzr;
+        float ai = 2.0f * orbit[2 * m + 1] + dzi;
+        float nr = ar * dzr - ai * dzi + dcr;
+        dzi = ar * dzi + ai * dzr + dci;
+        dzr = nr;
+        m++;
+        float zr = orbit[2 * m] + dzr;
+        float zi = orbit[2 * m + 1] + dzi;
+        float magnitude_sq = zr * zr + zi * zi;
+        if (magnitude_sq > static_cast<float>(BAILOUT_SQ)) {
+            return {n + 1, magnitude_sq, false, false};
+        }
+        if (magnitude_sq < dzr * dzr + dzi * dzi || m == orbit_length - 1) {
+            dzr = zr;
+            dzi = zi;
+            m = 0;
+        }
+        if ((n & ABORT_CHECK_MASK) == ABORT_CHECK_MASK && abort()) {
+            return {n, 0.0f, false, true};
+        }
+        float ref_r = orbit[2 * m], ref_i = orbit[2 * m + 1];
+        if (ref_r == saved_zr && ref_i == saved_zi && std::abs(dzr - saved_dzr) + std::abs(dzi - saved_dzi) < epsilon
+                && std::abs(dzr) + std::abs(dzi) < max_compared_dz) {
+            return {iter_limit, 0.0f, true, false};
+        }
+        if (n == save_at) {
+            saved_zr = ref_r;
+            saved_zi = ref_i;
+            saved_dzr = dzr;
+            saved_dzi = dzi;
+            save_at *= 2;
+        }
+    }
+    return {iter_limit, 0.0f, true, false};
+}
+
 }  // namespace
 
 Fractalis::Fractalis(FractalisState* state)
     : state(state), pass_id(0), pass_limit(0), pass_target(0), pass_resolved(0), next_index(0), in_flight(0),
-      returned_count(0), first_limit_hint(0) {}
+      returned_count(0), first_limit_hint(0) {
+    ref = {};
+    // Z_0 .. Z_MAX_ITER
+    ref.orbit = new float[2 * (MAX_ITER + 1)];
+}
+
+Fractalis::~Fractalis() {
+    delete[] ref.orbit;
+}
 
 int Fractalis::max_iterations(double zoom) const {
     double scale = state->screen_w / (3.0 / zoom);
@@ -139,7 +384,7 @@ bool Fractalis::calculate_pixel(int x, int y, const View& view, int iter_limit, 
     Escape escape;
 
     if (view.zoom < FLOAT_MAX_ZOOM) {
-        // Everything in single precision, double math is software emulated and would cost more than the iterations
+        // Everything in single precision, double math is slower and would cost more than the iterations
         float cr = view.center_rf + ((x + 0.5f - state->screen_w / 2.0f) * view.step_f + view.center_rf_low);
         float ci = view.center_if + ((y + 0.5f - state->screen_h / 2.0f) * view.step_f + view.center_if_low);
         if (is_in_main_bulb(cr, ci)) {
@@ -157,6 +402,20 @@ bool Fractalis::calculate_pixel(int x, int y, const View& view, int iter_limit, 
 
         if (optimize && is_in_main_bulb(cr, ci)) {
             escape = {iter_limit, 0.0f, true, false};
+        } else if (view.perturbed && (view.ref_offset_r + offset_r) * (view.ref_offset_r + offset_r)
+                   + (view.ref_offset_i + offset_i) * (view.ref_offset_i + offset_i) < view.interior_radius_sq) {
+            escape = {iter_limit, 0.0f, true, false};
+        } else if (view.perturbed && view.minibrot && is_in_component(view.cardioid,
+                       static_cast<float>((view.nucleus_offset_r + offset_r) * view.scale_r
+                                          - (view.nucleus_offset_i + offset_i) * view.scale_i),
+                       static_cast<float>((view.nucleus_offset_r + offset_r) * view.scale_i
+                                          + (view.nucleus_offset_i + offset_i) * view.scale_r))) {
+            escape = {iter_limit, 0.0f, true, false};
+        } else if (view.perturbed) {
+            float dcr = static_cast<float>(view.ref_offset_r + offset_r);
+            float dci = static_cast<float>(view.ref_offset_i + offset_i);
+            escape = iterate_perturbed(view.orbit, view.orbit_length, dcr, dci, iter_limit,
+                                       static_cast<float>(view.step * 1e-3), abort);
         } else if (view.zoom < DOUBLE_MAX_ZOOM) {
             escape = iterate<double>(cr, ci, iter_limit, view.step * 1e-3, optimize, abort);
         } else {
@@ -249,8 +508,18 @@ void Fractalis::start_pass() {
     pass_view.center_rf_low = static_cast<float>((pass_view.center.real - pass_view.center_rf).upper);
     pass_view.center_if_low = static_cast<float>((pass_view.center.imag - pass_view.center_if).upper);
     pass_view.step_f = static_cast<float>(pass_view.step);
+    pass_view.perturbed = pass_view.zoom >= PERTURBATION_MIN_ZOOM && pass_view.zoom < DOUBLE_DOUBLE_MAX_ZOOM;
 
     returned_count = 0;
+
+    // Keep the reference orbit while C is close to the screen. Further away, the pixel distances get lost in the
+    // single precision dc.
+    bool keep_reference = ref.length > 0 || ref.busy;
+    if (keep_reference) {
+        double dx = (ref.c.real - pass_view.center.real).upper / pass_view.step;
+        double dy = (ref.c.imag - pass_view.center.imag).upper / pass_view.step;
+        keep_reference = std::abs(dx) < state->screen_w && std::abs(dy) < state->screen_w;
+    }
 
     int target = max_iterations(state->zoom_factor);
     int first;
@@ -262,6 +531,10 @@ void Fractalis::start_pass() {
         first = next_pass_limit(std::max(FIRST_PASS_ITER, target / 16) / 2, target);
     }
     begin_pass(first, target);
+    // (begin_pass already chose a new one, if the kept orbit is too short)
+    if (pass_view.perturbed && !keep_reference && ref.tries == 0) {
+        choose_reference();
+    }
 }
 
 int Fractalis::estimate_first_limit() const {
@@ -298,6 +571,14 @@ void Fractalis::begin_pass(int limit, int target) {
     pass_resolved = 0;
     next_index = 0;
     state->iteration_limit = limit;
+    if (pass_view.perturbed) {
+        ref.tries = 0;
+        ref.best_length = 0;
+        if (ref.escaped && ref.length <= limit) {
+            // The reference escapes too early for this pass, take one of the pixels that are still undecided
+            choose_reference();
+        }
+    }
     printf("Starting pass %lu with iteration limit %d\n", static_cast<unsigned long>(pass_id), limit);
 }
 
@@ -360,6 +641,185 @@ void Fractalis::store_result(int x, int y, const PixelState& result) {
     }
 }
 
+bool Fractalis::reference_ready() const {
+    if (ref.busy || ref.length < 2) return false;
+    // An orbit that escaped too early is still used once no better C was found
+    return ref.length > pass_limit || ref.escaped;
+}
+
+void Fractalis::set_reference(const Coordinate& c) {
+    ref.c = c;
+    ref.length = 0;
+    ref.escaped = false;
+    ref.generation++;
+    ref.minibrot = Reference::MINIBROT_UNKNOWN;
+    ref.minibrot_tried_length = 0;
+}
+
+void Fractalis::choose_reference() {
+    const int cx = state->screen_w / 2;
+    const int cy = state->screen_h / 2;
+    int best_x = cx, best_y = cy;
+    int best_distance = INT32_MAX;
+    uint32_t best_position = 0;
+    bool in_set_found = false;
+    for (int y = 0; y < state->screen_h; ++y) {
+        for (int x = 0; x < state->screen_w; ++x) {
+            const PixelState& p = state->pixelState[y][x];
+            bool tried = false;
+            for (int i = 0; i < std::min(ref.tries, static_cast<int>(Reference::MAX_TRIES)); ++i) {
+                tried |= ref.tried_x[i] == x && ref.tried_y[i] == y;
+            }
+            if (tried) continue;
+            if (p.isInSet()) {
+                int distance = (x - cx) * (x - cx) + (y - cy) * (y - cy);
+                if (!in_set_found || distance < best_distance) {
+                    in_set_found = true;
+                    best_distance = distance;
+                    best_x = x;
+                    best_y = y;
+                }
+            } else if (!in_set_found && p.hasPosition() && p.position() > best_position) {
+                best_position = p.position();
+                best_x = x;
+                best_y = y;
+            }
+        }
+    }
+    if (ref.tries < Reference::MAX_TRIES) {
+        ref.tried_x[ref.tries] = static_cast<int16_t>(best_x);
+        ref.tried_y[ref.tries] = static_cast<int16_t>(best_y);
+    }
+    ref.tries++;
+    // The pixel center, exactly like calculate_pixel()
+    Coordinate c = pass_view.center;
+    c.real += (best_x + 0.5 - state->screen_w / 2.0) * pass_view.step;
+    c.imag += (best_y + 0.5 - state->screen_h / 2.0) * pass_view.step;
+    set_reference(c);
+}
+
+bool Fractalis::extend_reference(uint32_t id, int target_length, bool (*interrupt)()) {
+    uint32_t generation;
+    DD cr, ci, zr, zi;
+    int n;
+    {
+        LockGuard guard(lock);
+        generation = ref.generation;
+        cr = {ref.c.real.upper, ref.c.real.lower};
+        ci = {ref.c.imag.upper, ref.c.imag.lower};
+        zr = {ref.zr.upper, ref.zr.lower};
+        zi = {ref.zi.upper, ref.zi.lower};
+        n = ref.length;
+    }
+
+    // Nobody reads the orbit while it is not ready
+    float* orbit = ref.orbit;
+    if (n == 0) {
+        orbit[0] = orbit[1] = 0.0f;
+        zr = zi = {0, 0};
+        n = 1;
+    }
+    bool escaped = false;
+    bool aborted = false;
+    while (n < target_length) {
+        DD zr2 = dd_mul(zr, zr);
+        DD zi2 = dd_mul(zi, zi);
+        DD zri = dd_mul(zr, zi);
+        zi = dd_add({zri.hi * 2, zri.lo * 2}, ci);
+        zr = dd_add(dd_sub(zr2, zi2), cr);
+        orbit[2 * n] = static_cast<float>(zr.hi);
+        orbit[2 * n + 1] = static_cast<float>(zi.hi);
+        n++;
+        if (zr.hi * zr.hi + zi.hi * zi.hi > BAILOUT_SQ) {
+            escaped = true;
+            break;
+        }
+        if ((n & 255) == 0 && (state->calculation_id != id || (interrupt && interrupt()))) {
+            aborted = true;
+            break;
+        }
+    }
+
+    // Period guess for the minibrot search: the orbit comes closest to 0 at multiples of the period. The search
+    // reduces a multiple to the actual period.
+    int period_guess = 0;
+    bool search_minibrot = false;
+    if (!escaped && n >= 64) {
+        float lowest = INFINITY;
+        for (int k = 1; k < n; ++k) {
+            float m = orbit[2 * k] * orbit[2 * k] + orbit[2 * k + 1] * orbit[2 * k + 1];
+            if (m < lowest) {
+                lowest = m;
+                period_guess = k;
+            }
+        }
+    }
+
+    {
+        LockGuard guard(lock);
+        ref.busy = false;
+        if (ref.generation != generation) {
+            return true;  // a new C was chosen in the mean time
+        }
+        // Also an aborted orbit is valid as far as it got
+        ref.length = n;
+        ref.escaped = escaped;
+        ref.zr = DoubleDouble(zr.hi, zr.lo);
+        ref.zi = DoubleDouble(zi.hi, zi.lo);
+
+        if (escaped && n <= pass_limit && id == pass_id && pass_view.perturbed) {
+            // Pixels that need more iterations than the reference has would lose their precision
+            if (n > ref.best_length) {
+                ref.best_length = n;
+                ref.best_c = ref.c;
+            }
+            if (ref.tries < Reference::MAX_TRIES) {
+                choose_reference();
+            } else if (ref.best_length > n) {
+                set_reference(ref.best_c);
+            }
+        } else if (period_guess > 1 && (ref.minibrot == Reference::MINIBROT_UNKNOWN
+                   || (ref.minibrot == Reference::MINIBROT_NONE && n >= 2 * ref.minibrot_tried_length))) {
+            ref.minibrot = Reference::MINIBROT_NONE;
+            ref.minibrot_tried_length = n;
+            search_minibrot = true;
+        }
+    }
+    if (!search_minibrot) {
+        return !aborted;
+    }
+
+    // Takes a few thousand double-double iterations, the orbit is already usable in the mean time
+    bool interrupted = false;
+    auto check_interrupt = [&]() {
+        return interrupted = interrupt && interrupt();
+    };
+    Minibrot minibrot;
+    bool found = find_minibrot(cr, ci, period_guess, minibrot, check_interrupt);
+    // The last orbit value is close to the attracting cycle
+    double radius = found && !interrupted ? interior_radius(zr, zi, cr, ci, minibrot.period, check_interrupt) : 0;
+
+    LockGuard guard(lock);
+    if (ref.generation == generation) {
+        if (interrupted) {
+            ref.minibrot = Reference::MINIBROT_UNKNOWN;  // try again
+        } else if (found && (minibrot.usable || radius > 0)) {
+            ref.minibrot = Reference::MINIBROT_FOUND;
+            ref.component_check = minibrot.usable;
+            ref.period = minibrot.period;
+            ref.nucleus = {DoubleDouble(minibrot.nr_hi, minibrot.nr_lo), DoubleDouble(minibrot.ni_hi, minibrot.ni_lo)};
+            ref.cardioid = minibrot.cardioid;
+            ref.scale_r = minibrot.scale_r;
+            ref.scale_i = minibrot.scale_i;
+            ref.interior_radius = radius;
+            printf("Reference in a %s of period %d, size %.3g, inside within %.3g\n",
+                   minibrot.cardioid ? "minibrot" : "bulb", minibrot.period,
+                   1.0 / std::hypot(minibrot.scale_r, minibrot.scale_i), radius);
+        }
+    }
+    return !aborted && !interrupted;
+}
+
 bool Fractalis::work(bool (*interrupt)()) {
     if (state->calculating == 0) {
         return false;
@@ -372,6 +832,7 @@ bool Fractalis::work(bool (*interrupt)()) {
     uint32_t id;
     View view;
     int iter_limit;
+    bool calculate_reference = false;
     {
         LockGuard guard(lock);
         if (state->calculating == 0) {
@@ -380,7 +841,32 @@ bool Fractalis::work(bool (*interrupt)()) {
         if (pass_id != state->calculation_id) {
             start_pass();
         }
-        int batch = pass_view.zoom < FLOAT_MAX_ZOOM ? MAX_BATCH : pass_view.zoom < DOUBLE_MAX_ZOOM ? 4 : 1;
+        if (pass_view.perturbed && !reference_ready()) {
+            // Wait for the other core: it is calculating the orbit or still has pixels of the previous view, which
+            // read the orbit until they notice that they are not needed anymore
+            if (ref.busy || in_flight > 0) {
+                return false;
+            }
+            ref.busy = true;
+            calculate_reference = true;
+            id = pass_id;
+            // Straight to the limit of the view: costs little compared to the pixels, and the component search
+            // needs an orbit longer than the period
+            iter_limit = std::max(pass_limit, pass_target);
+        }
+    }
+    if (calculate_reference) {
+        return extend_reference(id, iter_limit + 1, interrupt);
+    }
+    {
+        LockGuard guard(lock);
+        if (state->calculating == 0 || pass_id != state->calculation_id
+                || (pass_view.perturbed && !reference_ready())) {
+            return true;  // changed in the mean time, try again
+        }
+        int batch = pass_view.zoom < FLOAT_MAX_ZOOM ? MAX_BATCH
+                  : pass_view.perturbed ? 8
+                  : pass_view.zoom < DOUBLE_MAX_ZOOM ? 4 : 1;
         while (count < batch && claim_pixel(xs[count], ys[count])) {
             count++;
         }
@@ -394,6 +880,22 @@ bool Fractalis::work(bool (*interrupt)()) {
         id = pass_id;
         view = pass_view;
         iter_limit = pass_limit;
+        if (view.perturbed) {
+            view.ref_offset_r = (view.center.real - ref.c.real).upper;
+            view.ref_offset_i = (view.center.imag - ref.c.imag).upper;
+            view.orbit = ref.orbit;
+            view.orbit_length = ref.length;
+            view.minibrot = ref.minibrot == Reference::MINIBROT_FOUND && ref.component_check;
+            view.interior_radius_sq = ref.minibrot == Reference::MINIBROT_FOUND
+                                    ? ref.interior_radius * ref.interior_radius : 0;
+            if (view.minibrot) {
+                view.nucleus_offset_r = (view.center.real - ref.nucleus.real).upper;
+                view.nucleus_offset_i = (view.center.imag - ref.nucleus.imag).upper;
+                view.cardioid = ref.cardioid;
+                view.scale_r = ref.scale_r;
+                view.scale_i = ref.scale_i;
+            }
+        }
         in_flight++;
     }
 
