@@ -51,13 +51,28 @@ uint32_t led_hold_until_ms = 0;
 // Info overlay, toggled with A
 bool hud_enabled = true;
 // While A is held, B, X and Y have other functions (layer 1). Tap and then hold A for the visual effects (layer 2),
-// tap twice and hold for the auto zoom settings (layer 3).
+// tap twice and hold for more visual effects (layer 3), three times for the auto zoom settings (layer 4).
 volatile uint8_t function_layer = 0;  // written by the button interrupt
 uint8_t function_mode = 0;            // what is currently displayed
 
 enum class ColorCycle : uint8_t { AUTO_ZOOM, ALWAYS, OFF };
 ColorCycle color_cycle = ColorCycle::ALWAYS;
 const char* const COLOR_CYCLE_NAMES[] = {"auto zoom", "always", "off"};
+const char* const TRAP_NAMES[] = {"off", "point", "cross", "ring"};
+// Visual 2: palette repetitions and light direction (the last one rotates)
+// Starts at 1x, cycles up to 4x and then from the fewest bands back to 1x
+constexpr float BANDS[] = {1.0f, 2.0f, 4.0f, 0.25f, 0.5f};
+const char* const BANDS_NAMES[] = {"1x", "2x", "4x", "0.25x", "0.5x"};
+constexpr int BANDS_COUNT = sizeof(BANDS) / sizeof(BANDS[0]);
+int bands = 0;
+constexpr float PI = 3.14159265f;
+constexpr float LIGHT_ANGLES[] = {-0.75f * PI, -0.25f * PI, 0.25f * PI, 0.75f * PI};
+const char* const LIGHT_NAMES[] = {"top left", "top right", "bottom right", "bottom left", "rotating"};
+constexpr int LIGHT_COUNT = sizeof(LIGHT_NAMES) / sizeof(LIGHT_NAMES[0]);
+constexpr int LIGHT_ROTATING = LIGHT_COUNT - 1;
+constexpr float LIGHT_ROTATION_SPEED = 2.0f * PI / 12.0f;  // radians per second: a turn in 12 s
+int light = 0;
+float light_angle = LIGHT_ANGLES[0];
 bool overlay_visible = false;
 
 void core1_entry();
@@ -160,6 +175,12 @@ int main() {
             color_phase -= (now - last_loop_ms) * COLOR_CYCLE_SPEED / 1000.0f;
             color_phase -= std::floor(color_phase);
             color_palette.set_phase(color_phase);
+            animating = true;
+        }
+        if (light == LIGHT_ROTATING && color_palette.shading) {
+            light_angle += (now - last_loop_ms) * LIGHT_ROTATION_SPEED / 1000.0f;
+            light_angle -= 2.0f * PI * std::floor(light_angle / (2.0f * PI));
+            color_palette.set_light(light_angle);
             animating = true;
         }
         last_loop_ms = now;
@@ -320,15 +341,19 @@ void render_overlay() {
     int margin = 5;
 
     // Button functionalities
-    // Layer 2: visual effects, layer 3: auto zoom settings
+    // Layer 2: visual effects, layer 3: visual effects 2, layer 4: auto zoom settings
     char text_b2[32], text_x2[32], text_y2[32];
     snprintf(text_b2, sizeof(text_b2), "> Shading: %s", color_palette.shading ? "on" : "off");
     snprintf(text_x2, sizeof(text_x2), "Supersampling: %dx <", fractalis.supersampling());
     snprintf(text_y2, sizeof(text_y2), "Color cycle: %s <", COLOR_CYCLE_NAMES[static_cast<int>(color_cycle)]);
     char text_b3[32], text_x3[32], text_y3[32];
-    snprintf(text_b3, sizeof(text_b3), "> Pause: %s", autoZoom.pause_name());
-    snprintf(text_x3, sizeof(text_x3), "Step: %s <", autoZoom.speed_name());
-    snprintf(text_y3, sizeof(text_y3), "Full quality: %s <", autoZoom.full_quality() ? "on" : "off");
+    snprintf(text_b3, sizeof(text_b3), "> Bands: %s", BANDS_NAMES[bands]);
+    snprintf(text_x3, sizeof(text_x3), "Orbit trap: %s <", TRAP_NAMES[fractalis.orbit_trap()]);
+    snprintf(text_y3, sizeof(text_y3), "Light: %s <", LIGHT_NAMES[light]);
+    char text_b4[32], text_x4[32], text_y4[32];
+    snprintf(text_b4, sizeof(text_b4), "> Pause: %s", autoZoom.pause_name());
+    snprintf(text_x4, sizeof(text_x4), "Step: %s <", autoZoom.speed_name());
+    snprintf(text_y4, sizeof(text_y4), "Full quality: %s <", autoZoom.full_quality() ? "on" : "off");
     const char* text_a = "UI / hold: Fn / taps+hold: More";
     const char* text_b = "Left / hold: Down";
     const char* text_x = "Right / hold: Up";
@@ -344,10 +369,15 @@ void render_overlay() {
         text_x = text_x2;
         text_y = text_y2;
     } else if (function_mode == 3) {
-        text_a = "[Auto zoom]";
+        text_a = "[Visual 2]";
         text_b = text_b3;
         text_x = text_x3;
         text_y = text_y3;
+    } else if (function_mode == 4) {
+        text_a = "[Auto zoom]";
+        text_b = text_b4;
+        text_x = text_x4;
+        text_y = text_y4;
     }
     int32_t text_x_width = display.measure_text(text_x, scale, 1);
     int32_t text_y_width = display.measure_text(text_y, scale, 1);
@@ -432,6 +462,8 @@ void update_led() {
     } else if (function_mode == 2) {
         led.set_rgb(0, 120, 255);
     } else if (function_mode == 3) {
+        led.set_rgb(0, 220, 255);
+    } else if (function_mode == 4) {
         led.set_rgb(255, 0, 120);
     } else if (state.calculating) {
         led.set_rgb(255, 150, 0);
@@ -493,8 +525,31 @@ void function2_pressed(int i) {
     show_led_feedback(255, 255, 255, 80);
 }
 
-// Short press in function layer 3 (auto zoom settings)
+// Short press in function layer 3 (visual effects 2)
 void function3_pressed(int i) {
+    switch (i) {
+        case 1: // Button B: color bands, no recalculation needed
+            bands = (bands + 1) % BANDS_COUNT;
+            color_palette.set_bands(BANDS[bands]);
+            break;
+        case 2: // Button X: orbit trap, recalculates the view
+            fractalis.set_orbit_trap((fractalis.orbit_trap() + 1) % Fractalis::TRAP_COUNT);
+            printf("Orbit trap: %s\n", TRAP_NAMES[fractalis.orbit_trap()]);
+            break;
+        case 3: // Button Y: light direction
+            light = (light + 1) % LIGHT_COUNT;
+            if (light != LIGHT_ROTATING) {
+                light_angle = LIGHT_ANGLES[light];
+                color_palette.set_light(light_angle);
+            }
+            break;
+    }
+    state.needs_redraw = true;
+    show_led_feedback(255, 255, 255, 80);
+}
+
+// Short press in function layer 4 (auto zoom settings)
+void function4_pressed(int i) {
     switch (i) {
         case 1: // Button B: pause after a finished view
             autoZoom.next_pause();
@@ -551,7 +606,7 @@ void button_long_pressed(int i) {
 
 // Buttons are sampled by a timer interrupt, so short presses aren't missed while the main loop is busy.
 // The interrupt only records events, the actions run in the main loop.
-enum class ButtonEvent : uint8_t { PRESS, LONG, REPEAT, FUNCTION, FUNCTION2, FUNCTION3 };
+enum class ButtonEvent : uint8_t { PRESS, LONG, REPEAT, FUNCTION, FUNCTION2, FUNCTION3, FUNCTION4 };
 struct ButtonEventEntry {
     uint8_t button;
     ButtonEvent event;
@@ -572,7 +627,8 @@ void push_event(int button, ButtonEvent event) {
  * A: short press shows/hides the info overlay. While A is held, B, X and Y have their second function
  *    (B reset view, X next palette, Y auto zoom on/off), like a shift key.
  *    Tap and then hold A for layer 2 (visual): B relief shading, X supersampling (1x - 8x), Y color cycling.
- *    Tap twice and then hold A for layer 3 (auto zoom): B pause after a finished view, X zoom step,
+ *    Tap twice and then hold A for layer 3 (visual 2): B color bands, X orbit trap, Y light direction.
+ *    Tap three times and then hold A for layer 4 (auto zoom): B pause after a finished view, X zoom step,
  *    Y full quality (wait for supersampling as well).
  * B, X, Y: short press pans left/right or zooms in, long press pans down/up or zooms out and repeats while held.
  */
@@ -615,8 +671,9 @@ bool sample_buttons(repeating_timer_t*) {
             } else if (shifted) {
                 // Function layers: right away, no long press
                 a_used = true;
-                push_event(i, a_layer == 3 ? ButtonEvent::FUNCTION3
-                              : a_layer == 2 ? ButtonEvent::FUNCTION2 : ButtonEvent::FUNCTION);
+                static constexpr ButtonEvent LAYER_EVENTS[] = {
+                    ButtonEvent::FUNCTION, ButtonEvent::FUNCTION2, ButtonEvent::FUNCTION3, ButtonEvent::FUNCTION4};
+                push_event(i, LAYER_EVENTS[a_layer - 1]);
             }
         } else if (raw) {
             uint32_t held = now - b.pressed_at;
@@ -633,7 +690,7 @@ bool sample_buttons(repeating_timer_t*) {
         } else if (b.down) {
             b.down = false;
             if (i == 0) {
-                if (a_layer < 3 && !a_used && now - b.pressed_at < LONG_PRESS_MS) {
+                if (a_layer < 4 && !a_used && now - b.pressed_at < LONG_PRESS_MS) {
                     tap_pending = true;
                     taps = a_layer;
                     tap_released_at = now;
@@ -646,7 +703,7 @@ bool sample_buttons(repeating_timer_t*) {
 
     if (tap_pending && now - tap_released_at >= DOUBLE_TAP_MS) {
         tap_pending = false;
-        if (taps == 1) push_event(0, ButtonEvent::PRESS);  // a double tap alone does nothing
+        if (taps == 1) push_event(0, ButtonEvent::PRESS);  // several taps alone do nothing
     }
 
     // The function labels show while A is held for a moment or used as shift key. Layer 2 right away.
@@ -675,6 +732,9 @@ void handle_input() {
                 break;
             case ButtonEvent::FUNCTION3:
                 function3_pressed(button);
+                break;
+            case ButtonEvent::FUNCTION4:
+                function4_pressed(button);
                 break;
             case ButtonEvent::LONG:
             case ButtonEvent::REPEAT:

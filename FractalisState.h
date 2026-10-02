@@ -19,7 +19,8 @@ struct Coordinate {
  *   neither          empty, nothing to display
  *   VALID            escaped, position is the (final or preview) palette position
  *   VALID + IN_SET   in the set (black)
- *   IN_SET only      in the set at the current iteration limit, but still shows the color of the preview
+ *   IN_SET only      in the set, but shown in color: the preview color while undecided at the current iteration
+ *                    limit, or the orbit trap color
  */
 struct PixelState {
     enum Flags : uint8_t {
@@ -44,7 +45,7 @@ struct PixelState {
     bool hasPosition() const { return (flags & KIND_MASK) == VALID; }
     // Drawn in color (not black)
     bool showsColor() const { return (flags & KIND_MASK) == VALID || (flags & KIND_MASK) == IN_SET; }
-    bool showsPreviewColor() const { return (flags & KIND_MASK) == IN_SET; }
+    bool isInSetColored() const { return (flags & KIND_MASK) == IN_SET; }
 
     uint32_t position() const { return (static_cast<uint32_t>(color) << 8) | fine; }
     void setPosition(uint32_t position) {
@@ -69,7 +70,9 @@ struct PixelState {
     void setInSet() { color = 0; fine = 0; flags = COMPLETE | VALID | IN_SET; }
     // In the set at the current limit, the preview color stays until the final pass
     void setInSetKeepingPreview() { flags = COMPLETE | IN_SET; }
-    void dropPreviewColor() { if (showsPreviewColor()) flags |= VALID; }
+    void dropPreviewColor() { if (isInSetColored()) flags |= VALID; }
+    // In the set, colored by the orbit trap
+    void setInSetColored(uint32_t position) { flags = COMPLETE | IN_SET; fine = 0; setPosition(position); }
 
     // Keep the displayed value, but mark the pixel for recalculation
     void markIncomplete() { flags &= ~COMPLETE; }

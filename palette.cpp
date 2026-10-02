@@ -57,11 +57,12 @@ constexpr float TRANSITION_SPEED = 0.2f;  // fraction per frame
 // Far away from the set the colors fade in from black
 constexpr uint32_t FADE_IN_END = static_cast<uint32_t>(VALUE_THRESHOLD * (1 << POSITION_BITS));
 
-// Relief shading: light from the top left
-constexpr float LIGHT_X = -0.70710678f;
-constexpr float LIGHT_Y = -0.70710678f;
+// Relief shading
 constexpr float LIGHT_HEIGHT = 1.2f;  // higher = softer shading
 constexpr float AMBIENT = 0.25f;
+// Slopes up to this (squared, in palette positions per pixel) count as flat: a step of the last bit would otherwise
+// show up as a line in otherwise flat areas
+constexpr float MIN_SLOPE_SQ = 2.0f;
 
 uint16_t pack565(float r, float g, float b) {
     auto c = [](float v) { return static_cast<uint16_t>(std::max(0.0f, std::min(v, 255.0f))); };
@@ -111,6 +112,12 @@ uint32_t position(float smooth_iteration) {
     return static_cast<uint32_t>(std::min(pos, 16777215.0f));
 }
 
+uint32_t trap_position(float distance_sq) {
+    // -log2(distance): every halving of the distance is another 2^18 positions, 2^16 to 2^-48 fit into 24 bit
+    float octaves = -0.5f * std::log2(std::max(distance_sq, 1e-30f)) + 16.0f;
+    return static_cast<uint32_t>(std::max(0.0f, std::min(octaves * 262144.0f, 16777215.0f)));
+}
+
 uint8_t spread_level(uint32_t range) {
     if (range < 2) return 1;
     // nearest level on the log scale, level k stands for 8^(k - 1)
@@ -129,8 +136,18 @@ Palette::Palette()
     select(0);
 }
 
+void Palette::set_light(float angle) {
+    light_x = std::cos(angle);
+    light_y = std::sin(angle);
+}
+
+void Palette::set_bands(float bands) {
+    this->bands = bands;
+    update_lut_step();
+}
+
 void Palette::update_lut_step() {
-    float c = cycles * PALETTES[current].cycles;
+    float c = cycles * PALETTES[current].cycles * bands;
     lut_step = static_cast<uint32_t>(c * LUT_SIZE * 65536.0f / (1 << POSITION_BITS));
 }
 
@@ -283,11 +300,11 @@ void Palette::render_rows(PixelState* const* pixels, int width, int height, int 
                 float gx = right.showsColor() ? dir_x * (static_cast<float>(right.position()) - pos) : 0.0f;
                 float gy = below[x].showsColor() ? dir_y * (static_cast<float>(below[x].position()) - pos) : 0.0f;
                 float length_sq = gx * gx + gy * gy;
-                if (length_sq > 0.0f) {
-                    float d = (gx * LIGHT_X + gy * LIGHT_Y) / std::sqrt(length_sq);
-                    float light = (d + LIGHT_HEIGHT) / (1.0f + LIGHT_HEIGHT);
-                    brightness *= AMBIENT + (1.0f - AMBIENT) * light;
-                }
+                // The palette position is the height. A slope faces the light when it rises away from it, so it is
+                // lit when the gradient points away from the light. Flat areas are lit like a horizontal surface.
+                float d = length_sq > MIN_SLOPE_SQ ? -(gx * light_x + gy * light_y) / std::sqrt(length_sq) : 0.0f;
+                float light = (d + LIGHT_HEIGHT) / (1.0f + LIGHT_HEIGHT);
+                brightness *= AMBIENT + (1.0f - AMBIENT) * light;
             }
 
             if (brightness < 0.999f) {

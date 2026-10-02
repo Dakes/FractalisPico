@@ -20,6 +20,8 @@ constexpr int LUT_BITS = 10;
 constexpr int LUT_SIZE = 1 << LUT_BITS;
 
 uint32_t position(float smooth_iteration);
+// Orbit traps: palette position from the smallest squared distance of the orbit to the trap (log scale)
+uint32_t trap_position(float distance_sq);
 
 /**
  * Supersampling: the range of the sub-sample positions on a log scale in 3 bits. 1 = none, then factors of 8 up
@@ -62,6 +64,14 @@ public:
     bool animate();
 
     bool shading = true;
+    /**
+     * Direction the relief light comes from, in radians: 0 = from the right, pi / 2 = from the bottom (screen
+     * coordinates). Starts at the top left.
+     */
+    void set_light(float angle);
+    // How many times the palette repeats over the range on screen, relative to the auto contrast (1 = normal)
+    void set_bands(float bands);
+    float get_bands() const { return bands; }
 
     /**
      * Draws the pixel state into an RGB565 frame buffer (in display byte order).
@@ -78,6 +88,8 @@ private:
     float range_start, cycles;
     float target_range_start, target_cycles;
     uint32_t lut_step;      // LUT entries per position unit, 16.16 fixed point
+    float bands = 1.0f;
+    float light_x = -0.70710678f, light_y = -0.70710678f;  // the top left
     void update_lut_step();
     uint16_t lut[LUT_SIZE]; // RGB565, native byte order
     // Running sums of the 5/6/5 bit channels of lut: prefix[c][i] = sum of lut[0 .. i-1]. The average color of

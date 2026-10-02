@@ -16,6 +16,11 @@ using namespace doubledouble;
  */
 class Fractalis {
 public:
+    // Orbit trap shapes, see set_orbit_trap()
+    enum Trap : int { TRAP_OFF, TRAP_POINT, TRAP_CROSS, TRAP_RING, TRAP_COUNT };
+    // Iterations for the trap of pixels the interior checks found in the set without iterating
+    static constexpr int TRAP_INTERIOR_ITER = 500;
+
     Fractalis(FractalisState* state);
     ~Fractalis();
     Fractalis(const Fractalis&) = delete;
@@ -47,6 +52,13 @@ public:
     // Supersamples the current view, if it is done but not supersampled yet (e.g. after auto zoom stopped)
     void supersample();
 
+    /**
+     * Orbit trap coloring: the color comes from how close the orbit gets to a shape (the origin, the axes or the
+     * unit circle), inside the set as well. Changing it recalculates the view.
+     */
+    void set_orbit_trap(int trap);
+    int orbit_trap() const { return trap_mode; }
+
     // The view and pixel state must not be modified by others while the lock is held
     Lock& get_lock() { return lock; }
 
@@ -67,12 +79,13 @@ private:
         const float* orbit;
         int orbit_length;
         // Hyperbolic component (minibrot or bulb) the reference is in, pixels safely inside are in the set
-        bool minibrot;
-        double nucleus_offset_r, nucleus_offset_i;  // center - nucleus
-        bool cardioid;
-        double scale_r, scale_i;
+        bool minibrot = false;
+        double nucleus_offset_r = 0, nucleus_offset_i = 0;  // center - nucleus
+        bool cardioid = false;
+        double scale_r = 0, scale_i = 0;
         // Everything this close to the reference is in the set (0 = unknown)
-        double interior_radius_sq;
+        double interior_radius_sq = 0;
+        int trap = TRAP_OFF;
     };
 
     /**
@@ -143,6 +156,7 @@ private:
     // Returns false if interrupted
     bool extend_reference(uint32_t id, int target_length, bool (*interrupt)());
 
+    int trap_mode = TRAP_OFF;
     // Supersampling, see set_supersampling()
     int ss_samples = 1;
     bool ss_pass = false;  // the current pass adds sub-samples
