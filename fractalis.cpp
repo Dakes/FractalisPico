@@ -1149,9 +1149,13 @@ void Fractalis::pan(double dx, double dy) {
 }
 
 void Fractalis::reset_view() {
+    set_view({-0.5, 0}, 1.0);
+}
+
+void Fractalis::set_view(const Coordinate& center, double zoom) {
     LockGuard guard(lock);
-    state->center = {-0.5, 0};
-    state->zoom_factor = 1.0;
+    state->center = center;
+    state->zoom_factor = zoom;
     state->resetPixelComplete();
     first_limit_hint = 0;
     request_calculation();

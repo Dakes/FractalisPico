@@ -55,6 +55,7 @@ add_executable(${NAME}
     fractalis.cpp
     AutoZoom.cpp
     palette.cpp
+    Settings.cpp
 )
 
 # Include required libraries
@@ -93,6 +94,8 @@ target_link_libraries(${NAME}
     pico_graphics
     pico_display
     pico_multicore
+    pico_flash
+    hardware_flash
     bitmap_fonts
     hershey_fonts
     rgbled

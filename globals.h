@@ -14,6 +14,11 @@
 // Wait this long for a serial terminal at startup when DEBUG is enabled
 #define USB_WAIT_MS 1000
 
+// The settings and the view are saved to the flash this long after the last button press, if anything changed
+#define SAVE_DELAY_MS 5000
+// During auto zoom the view is saved at most this often
+#define AUTO_ZOOM_SAVE_INTERVAL_MS 60000
+
 // Button timings
 #define BUTTON_SAMPLE_MS 2
 #define BUTTON_DEBOUNCE_SAMPLES 4

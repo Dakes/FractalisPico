@@ -18,9 +18,13 @@ public:
     void dive(uint32_t now_ms);
     void next_speed();
     const char* speed_name() const;
+    int speed_index() const { return speed; }
+    void set_speed(int index);
     // Time to look at a finished view before the next step (fly doesn't wait)
     void next_pause();
     const char* pause_name() const;
+    int pause_index() const { return pause; }
+    void set_pause(int index);
     // Waits for supersampling as well before the next step
     void toggle_full_quality();
     bool full_quality() const { return state->auto_zoom_full_quality; }

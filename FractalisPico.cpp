@@ -1,6 +1,7 @@
 #include "pico/stdlib.h"
 #include "pico/stdio_usb.h"
 #include "pico/multicore.h"
+#include "pico/flash.h"
 #include "pico/stdio.h"
 #include "hardware/clocks.h"
 #include "hardware/spi.h"
@@ -17,6 +18,7 @@
 #include "palette.h"
 #include "doubledouble.h"
 #include "StripDisplay.hpp"
+#include "Settings.hpp"
 #include <cmath>
 #include <cstring>
 #include <malloc.h>
@@ -48,6 +50,8 @@ extern volatile uint8_t event_head;
 extern volatile uint8_t event_tail;
 // Button feedback on the LED is shown until this time
 uint32_t led_hold_until_ms = 0;
+// Settings are saved a moment after the last button press
+uint32_t last_input_ms = 0;
 // Info overlay, toggled with A
 bool hud_enabled = true;
 // While A is held, B, X and Y have other functions (layer 1). Tap and then hold A for the visual effects (layer 2),
@@ -84,6 +88,8 @@ void handle_input();
 void help_calculating();
 void initialize_rand();
 bool sample_buttons(repeating_timer_t*);
+Settings current_settings();
+void apply_settings(const Settings& s);
 
 uint32_t now_ms() {
     return to_ms_since_boot(get_absolute_time());
@@ -130,7 +136,21 @@ int main() {
     led.set_brightness(20);
     printf("Display initialized\n");
 
+    // Holding B while powering on starts with the default settings, they are saved once B is released
+    bool defaults = button_b.raw();
+    Settings saved;
+    bool loaded = settings::load(saved);
     fractalis.reset_view();
+    if (defaults) {
+        printf("B held: starting with the default settings\n");
+        led.set_rgb(255, 255, 255);
+        while (button_b.raw()) sleep_ms(10);  // released before the buttons are sampled, so it doesn't pan
+    } else if (loaded) {
+        printf("Restoring the saved settings\n");
+        apply_settings(saved);
+    }
+    if (!loaded)
+        saved = current_settings();
     printf("Fractal state initialized, free RAM: %u KB\n", free_ram() / 1024);
 
     add_repeating_timer_ms(-BUTTON_SAMPLE_MS, sample_buttons, nullptr, &button_timer);
@@ -211,6 +231,18 @@ int main() {
             fractalis.supersample();
         was_auto_zoom = state.auto_zoom;
 
+        // Save what changed. During auto zoom the view changes all the time, it is saved once in a while.
+        static uint32_t last_save_ms = 0;
+        if (now - last_input_ms >= SAVE_DELAY_MS
+                && (!state.auto_zoom || now - last_save_ms >= AUTO_ZOOM_SAVE_INTERVAL_MS)) {
+            Settings current = current_settings();
+            if (memcmp(&current, &saved, sizeof(Settings)) != 0) {
+                settings::save(current);
+                saved = current;
+                last_save_ms = now;
+            }
+        }
+
         if (calculating) {
             help_calculating();
         } else {
@@ -221,6 +253,8 @@ int main() {
 
 void core1_entry() {
     printf("Core1 started\n");
+    // Core0 can then park this core while it writes the settings to the flash
+    flash_safe_execute_core_init();
     while(true) {
         if (!fractalis.work()) {
             sleep_ms(1);
@@ -719,6 +753,7 @@ void handle_input() {
         ButtonEvent event = event_queue[event_tail].event;
         event_tail = (event_tail + 1) % EVENT_QUEUE_SIZE;
         initialize_rand();
+        last_input_ms = now_ms();
 
         switch (event) {
             case ButtonEvent::PRESS:
@@ -755,4 +790,49 @@ void initialize_rand() {
         return;
     srand(to_ms_since_boot(get_absolute_time()));
     initialized = true;
+}
+
+Settings current_settings() {
+    Settings s{};
+    s.center = state.center;
+    s.zoom = state.zoom_factor;
+    s.palette = static_cast<uint8_t>(color_palette.index());
+    s.shading = color_palette.shading;
+    s.supersampling = static_cast<uint8_t>(fractalis.supersampling());
+    s.color_cycle = static_cast<uint8_t>(color_cycle);
+    s.bands = static_cast<uint8_t>(bands);
+    s.orbit_trap = static_cast<uint8_t>(fractalis.orbit_trap());
+    s.light = static_cast<uint8_t>(light);
+    s.hud = hud_enabled;
+    s.auto_zoom = state.auto_zoom;
+    s.auto_zoom_speed = static_cast<uint8_t>(autoZoom.speed_index());
+    s.auto_zoom_pause = static_cast<uint8_t>(autoZoom.pause_index());
+    s.auto_zoom_full_quality = state.auto_zoom_full_quality;
+    return s;
+}
+
+// Invalid values (e.g. from a broken record) fall back to the defaults
+void apply_settings(const Settings& s) {
+    bool view_valid = std::isfinite(s.center.real.upper) && std::isfinite(s.center.imag.upper)
+                      && std::isfinite(s.zoom) && s.zoom > 0;
+    if (view_valid)
+        fractalis.set_view(s.center, s.zoom);
+    color_palette.select(s.palette);
+    color_palette.shading = s.shading;
+    fractalis.set_supersampling(s.supersampling);
+    color_cycle = s.color_cycle < 3 ? static_cast<ColorCycle>(s.color_cycle) : ColorCycle::ALWAYS;
+    bands = s.bands < BANDS_COUNT ? s.bands : 0;
+    color_palette.set_bands(BANDS[bands]);
+    fractalis.set_orbit_trap(s.orbit_trap);
+    light = s.light < LIGHT_COUNT ? s.light : 0;
+    light_angle = LIGHT_ANGLES[light == LIGHT_ROTATING ? 0 : light];
+    color_palette.set_light(light_angle);
+    hud_enabled = s.hud;
+    autoZoom.set_speed(s.auto_zoom_speed);
+    autoZoom.set_pause(s.auto_zoom_pause);
+    state.auto_zoom_full_quality = s.auto_zoom_full_quality;
+    // A running auto zoom continues where it was
+    state.auto_zoom = s.auto_zoom && view_valid;
+    if (state.auto_zoom)
+        autoZoom.start();
 }

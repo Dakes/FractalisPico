@@ -50,6 +50,7 @@ public:
 
     void select(int index);
     void next();
+    int index() const { return current; }
     const char* name() const;
 
     // Shifts the colors along the palette, for color cycling animations. 1.0 = one full palette cycle.
