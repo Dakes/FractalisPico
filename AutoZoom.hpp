@@ -15,13 +15,22 @@ public:
      * Call regularly. Every step pans towards the area with the most detail and zooms in. Depending on the speed
      * it waits for the calculation to finish first or keeps going (fly).
      */
-    void dive(uint32_t now_ms, bool calculating);
+    void dive(uint32_t now_ms);
     void next_speed();
     const char* speed_name() const;
+    // Time to look at a finished view before the next step (fly doesn't wait)
+    void next_pause();
+    const char* pause_name() const;
+    // Waits for supersampling as well before the next step
+    void toggle_full_quality();
+    bool full_quality() const { return state->auto_zoom_full_quality; }
+    // Seconds until the next step during a pause, 0 otherwise
+    uint32_t seconds_to_next_step(uint32_t now_ms) const;
     // Call when auto zoom gets switched on. It continues from the current view.
     void start();
     std::pair<int, int> identifyCenterOfTileOfDetail(int& detail_score);
-    void initiatePan(int x, int y);
+    // Pans towards the target, so that it gets closer to the center with every zoom step
+    void initiatePan(int x, int y, double zoom_factor);
 
 private:
     FractalisState* state;
@@ -29,11 +38,19 @@ private:
     bool randomized_start;
     uint32_t next_step_ms;
     int speed;
+    int pause;
+
+    struct Pause {
+        const char* name;
+        uint32_t ms;
+    };
+    static const Pause PAUSES[];
+    static const int PAUSE_COUNT;
 
     struct Speed {
         const char* name;
         double zoom_factor;  // per step
-        uint32_t pause_ms;   // time to look at the image before the next step
+        uint32_t pause_ms;   // minimum time to look at the image before the next step
         // Next step once a pass with this fraction of the full iteration limit covered the screen (1 = all done)
         float detail;
     };

@@ -5,8 +5,8 @@
 #include <cstring>
 
 FractalisState::FractalisState(int width, int height)
-    : screen_w(width), screen_h(height), zoom_factor(1.0), auto_zoom(false),
-      calculating(0), calculation_id(0), needs_redraw(false), iteration_limit(25), passes_completed(0), completed_limit(0) {
+    : screen_w(width), screen_h(height), zoom_factor(1.0), auto_zoom(false), auto_zoom_full_quality(false),
+      calculating(0), supersampling(false), calculation_id(0), needs_redraw(false), iteration_limit(25), passes_completed(0), completed_limit(0) {
 
     center = {-0.5, 0};
 

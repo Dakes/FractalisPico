@@ -50,12 +50,13 @@ extern volatile uint8_t event_tail;
 uint32_t led_hold_until_ms = 0;
 // Info overlay, toggled with A
 bool hud_enabled = true;
-// While A is held, B, X and Y have other functions (layer 1). Tap and then hold A for layer 2.
+// While A is held, B, X and Y have other functions (layer 1). Tap and then hold A for the visual effects (layer 2),
+// tap twice and hold for the auto zoom settings (layer 3).
 volatile uint8_t function_layer = 0;  // written by the button interrupt
 uint8_t function_mode = 0;            // what is currently displayed
 
 enum class ColorCycle : uint8_t { AUTO_ZOOM, ALWAYS, OFF };
-ColorCycle color_cycle = ColorCycle::AUTO_ZOOM;
+ColorCycle color_cycle = ColorCycle::ALWAYS;
 const char* const COLOR_CYCLE_NAMES[] = {"auto zoom", "always", "off"};
 bool overlay_visible = false;
 
@@ -131,6 +132,8 @@ int main() {
     uint32_t seen_calculation = 0;
     uint32_t calculation_started_ms = 0;
     bool was_calculating = false;
+    bool was_auto_zoom = false;
+    uint32_t shown_seconds_to_step = 0;
     while(true) {
         update_led();
         handle_input();
@@ -153,7 +156,8 @@ int main() {
         }
         bool cycling = color_cycle == ColorCycle::ALWAYS || (color_cycle == ColorCycle::AUTO_ZOOM && state.auto_zoom);
         if (cycling && COLOR_CYCLE_SPEED > 0) {
-            color_phase += (now - last_loop_ms) * COLOR_CYCLE_SPEED / 1000.0f;
+            // Backwards through the palette: the colors move inwards, towards the set
+            color_phase -= (now - last_loop_ms) * COLOR_CYCLE_SPEED / 1000.0f;
             color_phase -= std::floor(color_phase);
             color_palette.set_phase(color_phase);
             animating = true;
@@ -173,8 +177,18 @@ int main() {
             update_display();
         }
 
+        // Without full quality, auto zoom doesn't wait for supersampling. The view is supersampled once it stops.
         if (state.auto_zoom && !state.needs_redraw)
-            autoZoom.dive(now_ms(), calculating);
+            autoZoom.dive(now_ms());
+        // The countdown of the auto zoom pause in the info overlay
+        uint32_t seconds_to_step = autoZoom.seconds_to_next_step(now);
+        if (hud_enabled && seconds_to_step != shown_seconds_to_step) {
+            shown_seconds_to_step = seconds_to_step;
+            state.needs_redraw = true;
+        }
+        if (was_auto_zoom && !state.auto_zoom)
+            fractalis.supersample();
+        was_auto_zoom = state.auto_zoom;
 
         if (calculating) {
             help_calculating();
@@ -247,7 +261,7 @@ void draw_strip(uint16_t* strip, int first_row, int rows) {
 
 // Adds a text to the overlay of this frame, in the current font
 void draw_text(const char* text, Point position, int scale) {
-    if (overlay_text_count >= MAX_OVERLAY_TEXTS)
+    if (overlay_text_count >= MAX_OVERLAY_TEXTS || *text == '\0')
         return;
     OverlayText& t = overlay_texts[overlay_text_count++];
     snprintf(t.text, sizeof(t.text), "%s", text);
@@ -306,11 +320,16 @@ void render_overlay() {
     int margin = 5;
 
     // Button functionalities
+    // Layer 2: visual effects, layer 3: auto zoom settings
     char text_b2[32], text_x2[32], text_y2[32];
     snprintf(text_b2, sizeof(text_b2), "> Shading: %s", color_palette.shading ? "on" : "off");
-    snprintf(text_x2, sizeof(text_x2), "Auto zoom step: %s <", autoZoom.speed_name());
+    snprintf(text_x2, sizeof(text_x2), "Supersampling: %dx <", fractalis.supersampling());
     snprintf(text_y2, sizeof(text_y2), "Color cycle: %s <", COLOR_CYCLE_NAMES[static_cast<int>(color_cycle)]);
-    const char* text_a = "UI / hold: Fn / tap+hold: More";
+    char text_b3[32], text_x3[32], text_y3[32];
+    snprintf(text_b3, sizeof(text_b3), "> Pause: %s", autoZoom.pause_name());
+    snprintf(text_x3, sizeof(text_x3), "Step: %s <", autoZoom.speed_name());
+    snprintf(text_y3, sizeof(text_y3), "Full quality: %s <", autoZoom.full_quality() ? "on" : "off");
+    const char* text_a = "UI / hold: Fn / taps+hold: More";
     const char* text_b = "Left / hold: Down";
     const char* text_x = "Right / hold: Up";
     const char* text_y = "Zoom / hold: Out";
@@ -320,10 +339,15 @@ void render_overlay() {
         text_x = "Palette <";
         text_y = state.auto_zoom ? "Auto zoom: stop <" : "Auto zoom: start <";
     } else if (function_mode == 2) {
-        text_a = "[More]";
+        text_a = "[Visual]";
         text_b = text_b2;
         text_x = text_x2;
         text_y = text_y2;
+    } else if (function_mode == 3) {
+        text_a = "[Auto zoom]";
+        text_b = text_b3;
+        text_x = text_x3;
+        text_y = text_y3;
     }
     int32_t text_x_width = display.measure_text(text_x, scale, 1);
     int32_t text_y_width = display.measure_text(text_y, scale, 1);
@@ -376,9 +400,25 @@ void render_overlay() {
     snprintf(palette_text, sizeof(palette_text), "Palette: %s", color_palette.name());
     draw_text(palette_text, Point(margin, info_y), scale);
 
+    if (fractalis.supersampling() > 1) {
+        info_y += font8_height + margin;
+        char ss_text[40];
+        snprintf(ss_text, sizeof(ss_text), "Supersampling: %dx%s", fractalis.supersampling(),
+                 state.supersampling ? " (working)" : "");
+        draw_text(ss_text, Point(margin, info_y), scale);
+    }
+
     if (state.auto_zoom) {
         info_y += font8_height + margin;
-        draw_text("Auto Zoom: ON", Point(margin, info_y), scale);
+        char auto_zoom_text[40];
+        uint32_t seconds = autoZoom.seconds_to_next_step(now_ms());
+        if (seconds > 1) {
+            snprintf(auto_zoom_text, sizeof(auto_zoom_text), "Auto Zoom: ON, next step in %lu:%02lu",
+                     static_cast<unsigned long>(seconds / 60), static_cast<unsigned long>(seconds % 60));
+        } else {
+            snprintf(auto_zoom_text, sizeof(auto_zoom_text), "Auto Zoom: ON");
+        }
+        draw_text(auto_zoom_text, Point(margin, info_y), scale);
     }
 }
 
@@ -391,6 +431,8 @@ void update_led() {
         led.set_rgb(200, 0, 255);
     } else if (function_mode == 2) {
         led.set_rgb(0, 120, 255);
+    } else if (function_mode == 3) {
+        led.set_rgb(255, 0, 120);
     } else if (state.calculating) {
         led.set_rgb(255, 150, 0);
     } else {
@@ -428,18 +470,43 @@ void function_pressed(int i) {
     show_led_feedback(255, 255, 255, 80);
 }
 
-// Short press in function layer 2
+// Short press in function layer 2 (visual effects)
 void function2_pressed(int i) {
     switch (i) {
         case 1: // Button B: relief shading
             color_palette.shading = !color_palette.shading;
             break;
-        case 2: // Button X: auto zoom step
+        case 2: { // Button X: supersampling 1x - 8x
+            static constexpr int STEPS[] = {1, 2, 3, 4, 6, 8};
+            constexpr int COUNT = sizeof(STEPS) / sizeof(STEPS[0]);
+            int current = 0;
+            while (current < COUNT - 1 && STEPS[current] != fractalis.supersampling()) current++;
+            fractalis.set_supersampling(STEPS[(current + 1) % COUNT]);
+            printf("Supersampling: %dx\n", fractalis.supersampling());
+            break;
+        }
+        case 3: // Button Y: color cycling
+            color_cycle = static_cast<ColorCycle>((static_cast<int>(color_cycle) + 1) % 3);
+            break;
+    }
+    state.needs_redraw = true;
+    show_led_feedback(255, 255, 255, 80);
+}
+
+// Short press in function layer 3 (auto zoom settings)
+void function3_pressed(int i) {
+    switch (i) {
+        case 1: // Button B: pause after a finished view
+            autoZoom.next_pause();
+            printf("Auto zoom pause: %s\n", autoZoom.pause_name());
+            break;
+        case 2: // Button X: zoom step
             autoZoom.next_speed();
             printf("Auto zoom step: %s\n", autoZoom.speed_name());
             break;
-        case 3: // Button Y: color cycling
-            color_cycle = static_cast<ColorCycle>((static_cast<int>(color_cycle) + 1) % 3);
+        case 3: // Button Y: wait for supersampling as well
+            autoZoom.toggle_full_quality();
+            printf("Auto zoom full quality: %d\n", autoZoom.full_quality());
             break;
     }
     state.needs_redraw = true;
@@ -484,7 +551,7 @@ void button_long_pressed(int i) {
 
 // Buttons are sampled by a timer interrupt, so short presses aren't missed while the main loop is busy.
 // The interrupt only records events, the actions run in the main loop.
-enum class ButtonEvent : uint8_t { PRESS, LONG, REPEAT, FUNCTION, FUNCTION2 };
+enum class ButtonEvent : uint8_t { PRESS, LONG, REPEAT, FUNCTION, FUNCTION2, FUNCTION3 };
 struct ButtonEventEntry {
     uint8_t button;
     ButtonEvent event;
@@ -504,7 +571,9 @@ void push_event(int button, ButtonEvent event) {
 /**
  * A: short press shows/hides the info overlay. While A is held, B, X and Y have their second function
  *    (B reset view, X next palette, Y auto zoom on/off), like a shift key.
- *    Tap and then hold A for layer 2: B relief shading, X auto zoom step, Y color cycling.
+ *    Tap and then hold A for layer 2 (visual): B relief shading, X supersampling (1x - 8x), Y color cycling.
+ *    Tap twice and then hold A for layer 3 (auto zoom): B pause after a finished view, X zoom step,
+ *    Y full quality (wait for supersampling as well).
  * B, X, Y: short press pans left/right or zooms in, long press pans down/up or zooms out and repeats while held.
  */
 bool sample_buttons(repeating_timer_t*) {
@@ -520,8 +589,10 @@ bool sample_buttons(repeating_timer_t*) {
     static Button* const buttons[4] = {&button_a, &button_b, &button_x, &button_y};
     static bool a_used = false;  // A was used as shift key, its release doesn't toggle the overlay
     static uint8_t a_layer = 1;  // layer selected by the current A press
-    // A short tap toggles the overlay only once it's clear that no second press (for layer 2) follows
+    // A short tap toggles the overlay only once it's clear that no further press (for layer 2 or 3) follows.
+    // taps: number of quick taps before the current press
     static bool tap_pending = false;
+    static uint8_t taps = 0;
     static uint32_t tap_released_at = 0;
     uint32_t now = now_ms();
 
@@ -539,12 +610,13 @@ bool sample_buttons(repeating_timer_t*) {
             b = {true, false, shifted, 0, now, now};
             if (i == 0) {
                 a_used = false;
-                a_layer = tap_pending && now - tap_released_at < DOUBLE_TAP_MS ? 2 : 1;
+                a_layer = tap_pending && now - tap_released_at < DOUBLE_TAP_MS ? taps + 1 : 1;
                 tap_pending = false;
             } else if (shifted) {
                 // Function layers: right away, no long press
                 a_used = true;
-                push_event(i, a_layer == 2 ? ButtonEvent::FUNCTION2 : ButtonEvent::FUNCTION);
+                push_event(i, a_layer == 3 ? ButtonEvent::FUNCTION3
+                              : a_layer == 2 ? ButtonEvent::FUNCTION2 : ButtonEvent::FUNCTION);
             }
         } else if (raw) {
             uint32_t held = now - b.pressed_at;
@@ -561,8 +633,9 @@ bool sample_buttons(repeating_timer_t*) {
         } else if (b.down) {
             b.down = false;
             if (i == 0) {
-                if (a_layer == 1 && !a_used && now - b.pressed_at < LONG_PRESS_MS) {
+                if (a_layer < 3 && !a_used && now - b.pressed_at < LONG_PRESS_MS) {
                     tap_pending = true;
+                    taps = a_layer;
                     tap_released_at = now;
                 }
             } else if (!b.long_fired && !b.shifted) {
@@ -573,12 +646,12 @@ bool sample_buttons(repeating_timer_t*) {
 
     if (tap_pending && now - tap_released_at >= DOUBLE_TAP_MS) {
         tap_pending = false;
-        push_event(0, ButtonEvent::PRESS);
+        if (taps == 1) push_event(0, ButtonEvent::PRESS);  // a double tap alone does nothing
     }
 
     // The function labels show while A is held for a moment or used as shift key. Layer 2 right away.
     ButtonTracker& a = trackers[0];
-    bool layer_shown = a.down && (a_layer == 2 || a_used || now - a.pressed_at >= LONG_PRESS_MS);
+    bool layer_shown = a.down && (a_layer >= 2 || a_used || now - a.pressed_at >= LONG_PRESS_MS);
     function_layer = layer_shown ? a_layer : 0;
     return true;
 }
@@ -599,6 +672,9 @@ void handle_input() {
                 break;
             case ButtonEvent::FUNCTION2:
                 function2_pressed(button);
+                break;
+            case ButtonEvent::FUNCTION3:
+                function3_pressed(button);
                 break;
             case ButtonEvent::LONG:
             case ButtonEvent::REPEAT:

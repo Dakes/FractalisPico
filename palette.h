@@ -21,6 +21,14 @@ constexpr int LUT_SIZE = 1 << LUT_BITS;
 
 uint32_t position(float smooth_iteration);
 
+/**
+ * Supersampling: the range of the sub-sample positions on a log scale in 3 bits. 1 = none, then factors of 8 up
+ * to 7 = the whole palette.
+ */
+uint8_t spread_level(uint32_t range);
+// Range of positions a level stands for. 0 for level 0 and 1.
+uint32_t spread_width(uint8_t level);
+
 struct ColorStop {
     float position;  // 0-1
     uint8_t r, g, b;
@@ -72,6 +80,10 @@ private:
     uint32_t lut_step;      // LUT entries per position unit, 16.16 fixed point
     void update_lut_step();
     uint16_t lut[LUT_SIZE]; // RGB565, native byte order
+    // Running sums of the 5/6/5 bit channels of lut: prefix[c][i] = sum of lut[0 .. i-1]. The average color of
+    // any range of the palette costs a subtraction and a division.
+    uint16_t prefix[3][LUT_SIZE + 1];
+    uint16_t average(uint32_t start, uint32_t width) const;
 };
 
 }  // namespace palette

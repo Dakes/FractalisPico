@@ -111,6 +111,18 @@ uint32_t position(float smooth_iteration) {
     return static_cast<uint32_t>(std::min(pos, 16777215.0f));
 }
 
+uint8_t spread_level(uint32_t range) {
+    if (range < 2) return 1;
+    // nearest level on the log scale, level k stands for 8^(k - 1)
+    int level = static_cast<int>(std::lround((std::log2(static_cast<float>(range)) + 3.0f) / 3.0f));
+    return static_cast<uint8_t>(std::max(1, std::min(level, 7)));
+}
+
+uint32_t spread_width(uint8_t level) {
+    // Twice the level's range: averaging a bit wider matches the average of the sub-sample colors best
+    return level <= 1 ? 0 : 1u << (3 * level - 2);
+}
+
 Palette::Palette()
     : current(0), phase_offset(0), range_start(0.0f), cycles(1.0f), target_range_start(0.0f), target_cycles(1.0f),
       lut_step(0) {
@@ -187,6 +199,12 @@ void Palette::select(int index) {
         float x = static_cast<float>(i) / LUT_SIZE + def.offset;
         lut[i] = def.stop_count == 0 ? hsv(x, 1.0f, 1.0f) : gradient(def, x);
     }
+    prefix[0][0] = prefix[1][0] = prefix[2][0] = 0;
+    for (int i = 0; i < LUT_SIZE; ++i) {
+        prefix[0][i + 1] = static_cast<uint16_t>(prefix[0][i] + (lut[i] >> 11));
+        prefix[1][i + 1] = static_cast<uint16_t>(prefix[1][i] + ((lut[i] >> 5) & 0x3F));
+        prefix[2][i + 1] = static_cast<uint16_t>(prefix[2][i] + (lut[i] & 0x1F));
+    }
     update_lut_step();
 }
 
@@ -201,6 +219,23 @@ const char* Palette::name() const {
 void Palette::set_phase(float phase) {
     phase = phase - std::floor(phase);
     phase_offset = static_cast<uint32_t>(phase * LUT_SIZE * 65536.0f);
+}
+
+uint16_t Palette::average(uint32_t start, uint32_t width) const {
+    if (width >= LUT_SIZE) {
+        start = 0;
+        width = LUT_SIZE;
+    }
+    start &= LUT_SIZE - 1;
+    uint32_t end = start + width;
+    uint32_t channels[3];
+    for (int c = 0; c < 3; ++c) {
+        const uint16_t* sums = prefix[c];
+        uint32_t sum = end <= LUT_SIZE ? sums[end] - sums[start]
+                                       : sums[LUT_SIZE] - sums[start] + sums[end - LUT_SIZE];
+        channels[c] = (sum + width / 2) / width;
+    }
+    return static_cast<uint16_t>((channels[0] << 11) | (channels[1] << 5) | channels[2]);
 }
 
 void Palette::render(PixelState* const* pixels, int width, int height, uint16_t* frame_buffer) const {
@@ -226,8 +261,19 @@ void Palette::render_rows(PixelState* const* pixels, int width, int height, int 
             int64_t relative = static_cast<int64_t>(pos) - start;
             uint32_t index = static_cast<uint32_t>((relative * lut_step + phase_offset) >> 16);
             uint16_t c = lut[index & (LUT_SIZE - 1)];
-
             float brightness = pos < FADE_IN_END ? static_cast<float>(pos) / FADE_IN_END : 1.0f;
+
+            // Supersampled: the average color over the range of palette positions the sub-samples covered, and
+            // darker by the share of them that is in the set
+            uint8_t spread = p.spread();
+            if (spread >= 2) {
+                uint32_t width = spread >= 7 ? LUT_SIZE
+                               : static_cast<uint32_t>((static_cast<uint64_t>(spread_width(spread)) * lut_step) >> 16);
+                if (width >= 2) {
+                    c = average(index - width / 2, width);
+                }
+            }
+            brightness *= 1.0f - 0.25f * p.coverage();
 
             if (shading) {
                 // Slope of the smooth iteration count towards the right and bottom neighbor.

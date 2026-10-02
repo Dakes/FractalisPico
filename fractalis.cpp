@@ -377,7 +377,7 @@ int Fractalis::max_iterations(double zoom) const {
 }
 
 bool Fractalis::calculate_pixel(int x, int y, const View& view, int iter_limit, uint32_t id, bool (*interrupt)(),
-                                PixelState& pixel) const {
+                                PixelState& pixel, float sub_x, float sub_y) const {
     auto abort = [this, id, interrupt]() {
         return state->calculation_id != id || (interrupt && interrupt());
     };
@@ -385,8 +385,8 @@ bool Fractalis::calculate_pixel(int x, int y, const View& view, int iter_limit, 
 
     if (view.zoom < FLOAT_MAX_ZOOM) {
         // Everything in single precision, double math is slower and would cost more than the iterations
-        float cr = view.center_rf + ((x + 0.5f - state->screen_w / 2.0f) * view.step_f + view.center_rf_low);
-        float ci = view.center_if + ((y + 0.5f - state->screen_h / 2.0f) * view.step_f + view.center_if_low);
+        float cr = view.center_rf + ((x + 0.5f + sub_x - state->screen_w / 2.0f) * view.step_f + view.center_rf_low);
+        float ci = view.center_if + ((y + 0.5f + sub_y - state->screen_h / 2.0f) * view.step_f + view.center_if_low);
         if (is_in_main_bulb(cr, ci)) {
             escape = {iter_limit, 0.0f, true, false};
         } else {
@@ -394,8 +394,8 @@ bool Fractalis::calculate_pixel(int x, int y, const View& view, int iter_limit, 
         }
     } else {
         // Offset from the center in the complex plane. Exact enough in double, even for deep zooms.
-        double offset_r = (x + 0.5 - state->screen_w / 2.0) * view.step;
-        double offset_i = (y + 0.5 - state->screen_h / 2.0) * view.step;
+        double offset_r = (x + 0.5 + sub_x - state->screen_w / 2.0) * view.step;
+        double offset_i = (y + 0.5 + sub_y - state->screen_h / 2.0) * view.step;
         double cr = view.center.real.upper + offset_r;
         double ci = view.center.imag.upper + offset_i;
         bool optimize = view.zoom < OPTIMIZATIONS_MAX_ZOOM;
@@ -429,17 +429,70 @@ bool Fractalis::calculate_pixel(int x, int y, const View& view, int iter_limit, 
         return false;
     }
 
-    pixel.clear();
-    pixel.flags = PixelState::COMPLETE | PixelState::VALID;
     if (escape.in_set) {
-        pixel.flags |= PixelState::IN_SET;
+        pixel.setInSet();
     } else {
         // Smooth (continuous) iteration count. The +2 (instead of the usual +1) keeps the palette as it was.
         float log2_z = 0.5f * std::log2(escape.magnitude_sq);
         float smooth = escape.iterations + 2 - std::log2(log2_z);
-        pixel.setPosition(palette::position(smooth));
+        pixel.setEscaped(palette::position(smooth));
     }
     return true;
+}
+
+bool Fractalis::supersample_pixel(int x, int y, const View& view, int iter_limit, uint32_t id, bool (*interrupt)(),
+                                  PixelState& pixel) const {
+    // The pixel center is the first sample, the others around it
+    static constexpr float OFFSETS_2[][2] = {{0.35f, 0.35f}};                     // diagonal
+    static constexpr float OFFSETS_3[][2] = {{0.38f, -0.22f}, {-0.38f, 0.22f}};   // line through the center
+    // Regular rings with radius 0.42 around the center
+    static constexpr float OFFSETS_4[][2] = {{0.0f, -0.42f}, {-0.36f, 0.21f}, {0.36f, 0.21f}};
+    static constexpr float OFFSETS_6[][2] = {
+        {0.000f, -0.420f}, {0.399f, -0.130f}, {0.247f, 0.340f}, {-0.247f, 0.340f}, {-0.399f, -0.130f}};
+    static constexpr float OFFSETS_8[][2] = {
+        {0.000f, -0.420f}, {0.328f, -0.262f}, {0.409f, 0.093f}, {0.182f, 0.378f}, {-0.182f, 0.378f},
+        {-0.409f, 0.093f}, {-0.328f, -0.262f}};
+    const float (*offsets)[2] = ss_samples == 2 ? OFFSETS_2 : ss_samples == 3 ? OFFSETS_3
+                              : ss_samples == 4 ? OFFSETS_4 : ss_samples == 6 ? OFFSETS_6 : OFFSETS_8;
+    int in_set = 0;
+    int escaped = 0;
+    uint64_t sum = 0;
+    uint32_t lowest = UINT32_MAX, highest = 0;
+    auto add = [&](const PixelState& sample) {
+        if (sample.isInSet()) {
+            in_set++;
+            return;
+        }
+        uint32_t position = sample.position();
+        escaped++;
+        sum += position;
+        lowest = std::min(lowest, position);
+        highest = std::max(highest, position);
+    };
+    add(pixel);
+    for (int i = 0; i < ss_samples - 1; ++i) {
+        PixelState sample;
+        const float* offset = offsets[i];
+        if (!calculate_pixel(x, y, view, iter_limit, id, interrupt, sample, offset[0], offset[1])) {
+            return false;
+        }
+        add(sample);
+    }
+
+    if (escaped == 0) {
+        pixel.setInSet();
+        pixel.setSupersampled(1, 0);
+    } else {
+        pixel.setEscaped(static_cast<uint32_t>(sum / escaped));
+        // Share of the samples in the set, in quarters. All of them would be in the set.
+        int coverage = std::min(3, (4 * in_set + ss_samples / 2) / ss_samples);
+        pixel.setSupersampled(palette::spread_level(highest - lowest), static_cast<uint8_t>(coverage));
+    }
+    return true;
+}
+
+bool Fractalis::needs_work(const PixelState& pixel) const {
+    return ss_pass ? pixel.isComplete() && !pixel.isSupersampled() : !pixel.isComplete();
 }
 
 bool Fractalis::claim_pixel(int& x, int& y) {
@@ -448,7 +501,7 @@ bool Fractalis::claim_pixel(int& x, int& y) {
         returned_count--;
         x = returned[returned_count].x;
         y = returned[returned_count].y;
-        if (!state->pixelState[y][x].isComplete()) {
+        if (needs_work(state->pixelState[y][x])) {
             return true;
         }
     }
@@ -490,7 +543,7 @@ bool Fractalis::claim_pixel(int& x, int& y) {
         if (x < 0 || x >= state->screen_w || y < 0 || y >= state->screen_h) {
             continue;
         }
-        if (!state->pixelState[y][x].isComplete()) {
+        if (needs_work(state->pixelState[y][x])) {
             return true;
         }
     }
@@ -500,6 +553,8 @@ bool Fractalis::claim_pixel(int& x, int& y) {
 void Fractalis::start_pass() {
     // A new view: start with a low iteration limit, so a first image appears quickly
     pass_id = state->calculation_id;
+    ss_pass = false;
+    state->supersampling = false;
     pass_view.center = state->center;
     pass_view.zoom = state->zoom_factor;
     pass_view.step = 4.0 / state->zoom_factor / state->screen_w;
@@ -583,6 +638,16 @@ void Fractalis::begin_pass(int limit, int target) {
 }
 
 void Fractalis::finish_pass() {
+    if (ss_pass) {
+        ss_pass = false;
+        state->supersampling = false;
+        state->calculating = 0;
+        state->passes_completed++;
+        state->needs_redraw = true;
+        printf("Supersampling complete\n");
+        return;
+    }
+
     // Count the pixels that are still undecided
     int unresolved = 0;
     for (int y = 0; y < state->screen_h; ++y) {
@@ -614,7 +679,7 @@ void Fractalis::finish_pass() {
                 pixel.markIncomplete();
             } else {
                 // Final: in the set, no more preview colors
-                pixel.flags &= ~PixelState::PREVIEW_COLOR;
+                pixel.dropPreviewColor();
             }
         }
     }
@@ -623,8 +688,12 @@ void Fractalis::finish_pass() {
     if (next_limit) {
         begin_pass(next_limit, pass_target);
     } else {
-        state->calculating = 0;
         printf("Calculation complete at iteration limit %d\n", pass_limit);
+        if (ss_samples > 1 && (!state->auto_zoom || state->auto_zoom_full_quality)) {
+            begin_supersampling();
+        } else {
+            state->calculating = 0;
+        }
     }
     state->passes_completed++;
     state->needs_redraw = true;
@@ -632,9 +701,11 @@ void Fractalis::finish_pass() {
 
 void Fractalis::store_result(int x, int y, const PixelState& result) {
     PixelState& target = state->pixelState[y][x];
-    if (result.isInSet() && target.showsColor()) {
+    if (ss_pass) {
+        target = result;
+    } else if (result.isInSet() && target.showsColor()) {
         // Undecided at this iteration limit: keep showing the zoom preview instead of black for now
-        target.flags = PixelState::COMPLETE | PixelState::VALID | PixelState::IN_SET | PixelState::PREVIEW_COLOR;
+        target.setInSetKeepingPreview();
     } else {
         target = result;
         if (!result.isInSet()) pass_resolved++;
@@ -833,6 +904,7 @@ bool Fractalis::work(bool (*interrupt)()) {
     View view;
     int iter_limit;
     bool calculate_reference = false;
+    bool supersampling = false;
     {
         LockGuard guard(lock);
         if (state->calculating == 0) {
@@ -867,7 +939,14 @@ bool Fractalis::work(bool (*interrupt)()) {
         int batch = pass_view.zoom < FLOAT_MAX_ZOOM ? MAX_BATCH
                   : pass_view.perturbed ? 8
                   : pass_view.zoom < DOUBLE_MAX_ZOOM ? 4 : 1;
+        if (ss_pass) {
+            batch = std::max(1, batch / (ss_samples - 1));  // every pixel is several samples
+        }
+        supersampling = ss_pass;
         while (count < batch && claim_pixel(xs[count], ys[count])) {
+            if (supersampling) {
+                results[count] = state->pixelState[ys[count]][xs[count]];  // the center sample
+            }
             count++;
         }
         if (count == 0) {
@@ -900,7 +979,11 @@ bool Fractalis::work(bool (*interrupt)()) {
     }
 
     int done = 0;
-    while (done < count && calculate_pixel(xs[done], ys[done], view, iter_limit, id, interrupt, results[done])) {
+    while (done < count) {
+        bool calculated = supersampling
+            ? supersample_pixel(xs[done], ys[done], view, iter_limit, id, interrupt, results[done])
+            : calculate_pixel(xs[done], ys[done], view, iter_limit, id, interrupt, results[done]);
+        if (!calculated) break;
         done++;
     }
 
@@ -922,6 +1005,7 @@ bool Fractalis::work(bool (*interrupt)()) {
 
 void Fractalis::request_calculation() {
     state->completed_limit = 0;
+    state->supersampling = false;
     state->calculating = 1;
     state->calculation_id++;
     state->needs_redraw = true;
@@ -961,4 +1045,34 @@ void Fractalis::reset_view() {
     state->resetPixelComplete();
     first_limit_hint = 0;
     request_calculation();
+}
+
+void Fractalis::begin_supersampling() {
+    ss_pass = true;
+    state->supersampling = true;
+    next_index = 0;
+    returned_count = 0;
+    printf("Supersampling with %d samples per pixel\n", ss_samples);
+}
+
+void Fractalis::set_supersampling(int samples) {
+    LockGuard guard(lock);
+    ss_samples = samples == 2 || samples == 3 || samples == 4 || samples == 6 || samples == 8 ? samples : 1;
+    // The pixels only keep the mean of their samples, so everything is calculated again. The image stays as preview.
+    for (int y = 0; y < state->screen_h; ++y) {
+        for (int x = 0; x < state->screen_w; ++x) {
+            state->pixelState[y][x].markIncomplete();
+        }
+    }
+    first_limit_hint = estimate_first_limit();
+    request_calculation();
+}
+
+void Fractalis::supersample() {
+    LockGuard guard(lock);
+    if (state->calculating != 0 || ss_samples < 2 || pass_id != state->calculation_id) {
+        return;
+    }
+    begin_supersampling();
+    state->calculating = 1;
 }

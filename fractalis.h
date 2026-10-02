@@ -38,6 +38,15 @@ public:
     void pan(double dx, double dy);
     void reset_view();
 
+    /**
+     * Supersampling: once a view is calculated, every pixel gets samples - 1 more sub-samples. 1 (off), 2, 3, 4, 6
+     * or 8. Changing it recalculates the view. Not done during auto zoom, unless it waits for full quality.
+     */
+    void set_supersampling(int samples);
+    int supersampling() const { return ss_samples; }
+    // Supersamples the current view, if it is done but not supersampled yet (e.g. after auto zoom stopped)
+    void supersample();
+
     // The view and pixel state must not be modified by others while the lock is held
     Lock& get_lock() { return lock; }
 
@@ -134,9 +143,19 @@ private:
     // Returns false if interrupted
     bool extend_reference(uint32_t id, int target_length, bool (*interrupt)());
 
-    // Returns false, if the calculation was aborted
+    // Supersampling, see set_supersampling()
+    int ss_samples = 1;
+    bool ss_pass = false;  // the current pass adds sub-samples
+    void begin_supersampling();
+    // Pixels the current pass still has to do
+    bool needs_work(const PixelState& pixel) const;
+
+    // Returns false, if the calculation was aborted. sub_x/sub_y: sample position in the pixel, 0 = center.
     bool calculate_pixel(int x, int y, const View& view, int iter_limit, uint32_t id, bool (*interrupt)(),
-                         PixelState& pixel) const;
+                         PixelState& pixel, float sub_x = 0.0f, float sub_y = 0.0f) const;
+    // Adds the sub-samples to a calculated pixel
+    bool supersample_pixel(int x, int y, const View& view, int iter_limit, uint32_t id, bool (*interrupt)(),
+                           PixelState& pixel) const;
 };
 
 #endif // FRACTALIS_H

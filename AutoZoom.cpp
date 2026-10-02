@@ -15,8 +15,17 @@ const AutoZoom::Speed AutoZoom::SPEEDS[] = {
 };
 const int AutoZoom::SPEED_COUNT = sizeof(SPEEDS) / sizeof(SPEEDS[0]);
 
+const AutoZoom::Pause AutoZoom::PAUSES[] = {
+    {"none", 0},
+    {"10s", 10'000},
+    {"1m", 60'000},
+    {"5m", 300'000},
+    {"1h", 3'600'000},
+};
+const int AutoZoom::PAUSE_COUNT = sizeof(PAUSES) / sizeof(PAUSES[0]);
+
 AutoZoom::AutoZoom(FractalisState* state, Fractalis* fractalis)
-    : state(state), fractalis(fractalis), randomized_start(false), next_step_ms(0), speed(1) {}
+    : state(state), fractalis(fractalis), randomized_start(false), next_step_ms(0), speed(1), pause(0) {}
 
 // zoom() takes the relative change, e.g. 0.1 for x1.1
 static double zoom_in_change(double factor) { return factor - 1.0; }
@@ -37,17 +46,37 @@ const char* AutoZoom::speed_name() const {
     return SPEEDS[speed].name;
 }
 
-void AutoZoom::dive(uint32_t now_ms, bool calculating) {
+void AutoZoom::next_pause() {
+    pause = (pause + 1) % PAUSE_COUNT;
+    next_step_ms = 0;
+}
+
+const char* AutoZoom::pause_name() const {
+    return PAUSES[pause].name;
+}
+
+void AutoZoom::toggle_full_quality() {
+    state->auto_zoom_full_quality = !state->auto_zoom_full_quality;
+}
+
+uint32_t AutoZoom::seconds_to_next_step(uint32_t now_ms) const {
+    if (!state->auto_zoom || next_step_ms == 0 || static_cast<int32_t>(next_step_ms - now_ms) <= 0) return 0;
+    return (next_step_ms - now_ms + 999) / 1000;
+}
+
+void AutoZoom::dive(uint32_t now_ms) {
     const Speed& s = SPEEDS[speed];
+    // Supersampling only counts with full quality, otherwise the next step cancels it
+    bool calculating = state->calculating != 0 && (state->auto_zoom_full_quality || !state->supersampling);
     int needed_limit = static_cast<int>(s.detail * fractalis->max_iterations(state->zoom_factor));
     bool ready = !calculating || (s.detail < 1.0f && state->completed_limit >= needed_limit);
     if (!state->auto_zoom || !ready) {
         next_step_ms = 0;
         return;
     }
-    // Pause before every step
+    // Pause before every step. Fly keeps going.
     if (next_step_ms == 0) {
-        next_step_ms = now_ms + s.pause_ms;
+        next_step_ms = now_ms + (s.detail < 1.0f ? s.pause_ms : std::max(s.pause_ms, PAUSES[pause].ms));
         return;
     }
     if (static_cast<int32_t>(now_ms - next_step_ms) < 0) {
@@ -68,7 +97,7 @@ void AutoZoom::dive(uint32_t now_ms, bool calculating) {
         // Nothing interesting on screen (e.g. inside the set), back out
         fractalis->zoom(zoom_out_change(s.zoom_factor));
     } else {
-        initiatePan(zoomPoint.first, zoomPoint.second);
+        initiatePan(zoomPoint.first, zoomPoint.second, s.zoom_factor);
         fractalis->zoom(zoom_in_change(s.zoom_factor));
     }
 }
@@ -102,9 +131,12 @@ std::pair<int, int> AutoZoom::identifyCenterOfTileOfDetail(int& detail_score) {
     return centerOfHighDetail;
 }
 
-void AutoZoom::initiatePan(int x, int y) {
-    double panX = (x - state->screen_w / 2) / static_cast<double>(state->screen_w) * PAN_CONSTANT;
-    double panY = (y - state->screen_h / 2) / static_cast<double>(state->screen_h) * PAN_CONSTANT;
+void AutoZoom::initiatePan(int x, int y, double zoom_factor) {
+    // The zoom afterwards pushes the target away from the center by the zoom factor. Panning this share of the way
+    // brings it 1 / zoom_factor closer to the center with every step, independent of the step size.
+    double share = 1.0 - 1.0 / (zoom_factor * zoom_factor);
+    double panX = (x - state->screen_w / 2) / static_cast<double>(state->screen_w) * share;
+    double panY = (y - state->screen_h / 2) / static_cast<double>(state->screen_h) * share;
 
     if (!this->randomized_start) {
         const double max = 0.35;
