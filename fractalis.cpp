@@ -749,6 +749,7 @@ uint64_t (*Fractalis::clock_us)() = nullptr;
 uint32_t (*Fractalis::cycle_counter)() = nullptr;
 
 void Fractalis::log_pass(const char* name) {
+    stats.pass_count++;
     if (!clock_us) return;
     int left = static_cast<int>(sizeof(stats.passes)) - stats.passes_length;
     if (left <= 1) return;
@@ -757,7 +758,8 @@ void Fractalis::log_pass(const char* name) {
     stats.passes_length += std::max(0, std::min(n, left - 1));
 }
 
-void Fractalis::print_stats() {
+void Fractalis::finish_stats() {
+    stats.view_end = now_us();
     if (!clock_us) return;
     printf("Stats: %lu ms | %s| reference: %d orbits, %d iterations, %lu ms, search %lu ms | pixels: %lu, %.1f M "
            "iterations, %lu cycles per iteration\n",
@@ -766,6 +768,14 @@ void Fractalis::print_stats() {
            static_cast<unsigned long>(stats.search_us / 1000), static_cast<unsigned long>(stats.pixels),
            stats.iterations / 1e6,
            static_cast<unsigned long>(stats.iterations ? stats.cycles / stats.iterations : 0));
+}
+
+Fractalis::ViewStats Fractalis::view_stats() {
+    LockGuard guard(lock);
+    const uint64_t end = stats.view_end ? stats.view_end : now_us();
+    return {static_cast<uint32_t>((end - stats.view_start) / 1000), stats.pass_count, stats.iterations,
+            static_cast<uint32_t>(stats.iterations ? stats.cycles / stats.iterations : 0), stats.pixels,
+            stats.ref_orbits, static_cast<uint32_t>(stats.ref_us / 1000)};
 }
 
 int Fractalis::max_iterations(double zoom) const {
@@ -1315,7 +1325,7 @@ void Fractalis::finish_pass() {
         state->needs_redraw = true;
         printf("Supersampling complete\n");
         log_pass("ss");
-        print_stats();
+        finish_stats();
         return;
     }
     if (probe_pass) {
@@ -1382,7 +1392,7 @@ void Fractalis::finish_pass() {
             begin_supersampling();
         } else {
             state->calculating = 0;
-            print_stats();
+            finish_stats();
         }
     }
     state->passes_completed++;

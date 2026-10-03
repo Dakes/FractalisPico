@@ -45,6 +45,11 @@ struct Definition {
     float offset;  // shifts the palette
 };
 
+int count();
+const char* name(int index);
+// The color of a palette at x (0-1 is once through it), RGB565 in native byte order. For previews.
+uint16_t sample(int index, float x);
+
 class Palette {
 public:
     Palette();

@@ -37,21 +37,17 @@ void AutoZoom::start() {
     next_step_ms = 0;
 }
 
-void AutoZoom::next_speed() {
-    set_speed(speed + 1);
-}
-
 void AutoZoom::set_speed(int index) {
     speed = ((index % SPEED_COUNT) + SPEED_COUNT) % SPEED_COUNT;
     next_step_ms = 0;
 }
 
-const char* AutoZoom::speed_name() const {
-    return SPEEDS[speed].name;
+int AutoZoom::speed_count() {
+    return SPEED_COUNT;
 }
 
-void AutoZoom::next_pause() {
-    set_pause(pause + 1);
+const char* AutoZoom::speed_name(int index) {
+    return SPEEDS[((index % SPEED_COUNT) + SPEED_COUNT) % SPEED_COUNT].name;
 }
 
 void AutoZoom::set_pause(int index) {
@@ -59,12 +55,12 @@ void AutoZoom::set_pause(int index) {
     next_step_ms = 0;
 }
 
-const char* AutoZoom::pause_name() const {
-    return PAUSES[pause].name;
+int AutoZoom::pause_count() {
+    return PAUSE_COUNT;
 }
 
-void AutoZoom::toggle_full_quality() {
-    state->auto_zoom_full_quality = !state->auto_zoom_full_quality;
+const char* AutoZoom::pause_name(int index) {
+    return PAUSES[((index % PAUSE_COUNT) + PAUSE_COUNT) % PAUSE_COUNT].name;
 }
 
 uint32_t AutoZoom::seconds_to_next_step(uint32_t now_ms) const {

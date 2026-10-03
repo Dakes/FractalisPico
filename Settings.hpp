@@ -15,10 +15,10 @@ struct Settings {
     uint8_t shading;
     uint8_t supersampling;
     uint8_t color_cycle;
-    uint8_t bands;
+    uint8_t bands;  // id of the band count, see the menu
     uint8_t orbit_trap;
     uint8_t light;
-    uint8_t hud;
+    uint8_t hud;    // info overlay: 0 off, 1 on, 2 auto
     uint8_t auto_zoom;
     uint8_t auto_zoom_speed;
     uint8_t auto_zoom_pause;
@@ -27,8 +27,9 @@ struct Settings {
     uint8_t show_probes;
     uint8_t supersample_right_away;
     uint8_t set_display_preview;  // 0: undecided pixels are part of the set, 1: they keep the preview color
-    uint8_t reserved[1];
-    // Saved views, zoom 0 = empty. Added later: records without them load with empty slots.
+    uint8_t color_cycle_speed;    // option of the menu + 1, 0 = the default
+    // Saved views of older versions (slots 1 and 2), zoom 0 = empty. They show until these slots are stored again,
+    // the views are stored in their own sectors now (see settings::view()).
     struct Slot {
         Coordinate center;
         double zoom;
@@ -47,6 +48,34 @@ namespace settings {
 bool load(Settings& out);
 // Appends the settings to the flash. Stalls both cores for about a millisecond, ~50 ms when a sector gets erased.
 bool save(const Settings& settings);
+
+/**
+ * Saved views, each with a small picture of it. Every slot has two sectors of its own in front of the settings.
+ */
+constexpr int VIEW_SLOTS = 10;
+// The picture: 1/5 of the screen, RGB565 in display byte order
+constexpr int THUMBNAIL_W = 64;
+constexpr int THUMBNAIL_H = 48;
+
+struct View {
+    Coordinate center;
+    double zoom;
+    // The look it was stored with, restored when going there
+    uint8_t has_look;
+    uint8_t palette, bands, orbit_trap, shading, light;
+    uint8_t reserved[2];
+};
+static_assert(sizeof(View) == 80, "View must not contain padding");
+
+// The view stored in the slot, nullptr if it is empty
+const View* view(int slot);
+// The picture of the view in the slot, nullptr if there is none
+const uint16_t* thumbnail(int slot);
+/**
+ * Stores a view. draw_thumbnail draws its picture (THUMBNAIL_W x THUMBNAIL_H) into the buffer, nullptr: none.
+ * Erases two sectors: stalls both cores for ~100 ms.
+ */
+bool store_view(int slot, const View& view, void (*draw_thumbnail)(uint16_t* out));
 
 }  // namespace settings
 

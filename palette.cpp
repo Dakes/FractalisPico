@@ -106,6 +106,20 @@ uint16_t gradient(const Definition& def, float x) {
 
 }  // namespace
 
+int count() {
+    return PALETTE_COUNT;
+}
+
+const char* name(int index) {
+    return PALETTES[((index % PALETTE_COUNT) + PALETTE_COUNT) % PALETTE_COUNT].name;
+}
+
+uint16_t sample(int index, float x) {
+    const Definition& def = PALETTES[((index % PALETTE_COUNT) + PALETTE_COUNT) % PALETTE_COUNT];
+    x += def.offset;
+    return def.stop_count == 0 ? hsv(x, 1.0f, 1.0f) : gradient(def, x);
+}
+
 uint32_t position(float smooth_iteration) {
     float t = std::log(1.0f + std::max(smooth_iteration, 0.0f)) / 2.0f;
     float pos = t * static_cast<float>(1 << POSITION_BITS);
@@ -230,7 +244,7 @@ void Palette::next() {
 }
 
 const char* Palette::name() const {
-    return PALETTES[current].name;
+    return palette::name(current);
 }
 
 void Palette::set_phase(float phase) {

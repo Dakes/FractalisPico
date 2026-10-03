@@ -56,6 +56,8 @@ add_executable(${NAME}
     AutoZoom.cpp
     palette.cpp
     Settings.cpp
+    Menu.cpp
+    Ui.cpp
 )
 
 # Include required libraries

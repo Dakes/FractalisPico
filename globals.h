@@ -12,7 +12,6 @@
 // ... while a view is being calculated: a frame takes core0 ~30 ms, it calculates in between
 #define ANIMATION_INTERVAL_CALCULATING_MS 100
 #define CORE0_WORK_MS 20         // How long core0 helps calculating before it checks input again
-#define COLOR_CYCLE_SPEED 0.04f  // Palette cycles per second during auto zoom. 0 = off
 
 // RGB LED pins. Display Pack 2.8": 26, 27, 28. Display Pack 1.14" and 2.0": 6, 7, 8
 #define LED_PIN_R 26
@@ -31,10 +30,15 @@
 #define BUTTON_SAMPLE_MS 2
 #define BUTTON_DEBOUNCE_SAMPLES 4
 #define LONG_PRESS_MS 350
-// A tap followed by a press within this time selects the next function layer. Starts again with every tap.
-#define DOUBLE_TAP_MS 300
 #define REPEAT_MS 250            // Repeat interval of long press actions while the button is held
-#define TEST_JUMP_HOLD_MS 2000   // Holding A + B this long jumps to the next deep test location
+#define MENU_REPEAT_MS 120       // Holding X or Y in the menu moves the cursor this often
+
+// The menu closes by itself after this long without a button press
+#define MENU_TIMEOUT_MS 60000
+// Info overlay "auto": shown this long after a button press
+#define INFO_AUTO_HIDE_MS 5000
+// Short messages (e.g. after a quick function) show this long
+#define TOAST_MS 1500
 
 #define PAN_CONSTANT 0.1
 #define ZOOM_CONSTANT 0.1
@@ -61,8 +65,9 @@
 #ifndef SCALED_PERTURBATION_MIN_ZOOM
 #define SCALED_PERTURBATION_MIN_ZOOM 1e32
 #endif
-// Beyond this the fixed point coordinates (~74 digits) run out of precision
-#define PRECISION_MAX_ZOOM 1e70
+// Beyond this the fixed point coordinates (248 fraction bits, steps of ~2.2e-75) run out of precision: at 1e72 a
+// pixel is still ~5.6 steps wide, at 1e73 only half a step
+#define PRECISION_MAX_ZOOM 1e72
 // Above this zoom level the main cardioid/bulb check and periodicity checks are not precise enough
 #define OPTIMIZATIONS_MAX_ZOOM 1e7
 // Pixels that haven't escaped at the limit of the current pass are shown as part of the set (black), so the set

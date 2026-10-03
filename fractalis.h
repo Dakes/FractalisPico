@@ -85,6 +85,18 @@ public:
     // Core cycles since some point (DWT), to measure the cycles per iteration. nullptr: not measured.
     static uint32_t (*cycle_counter)();
 
+    // Statistics of the current view so far, or of the last one once it is done. Times need clock_us.
+    struct ViewStats {
+        uint32_t ms;
+        int passes;
+        uint64_t iterations;
+        uint32_t cycles_per_iteration;  // 0: not measured
+        uint32_t pixels;                // calculated, sub-samples and repeated ones included
+        int ref_orbits;
+        uint32_t ref_ms;
+    };
+    ViewStats view_stats();
+
     // Iteration limit for a full calculation pass at the given zoom, estimated without looking at the view
     int max_iterations(double zoom) const;
     // Iteration limit the current view aims for, measured with the probe points
@@ -169,6 +181,8 @@ private:
     // Where the time of a view goes, printed when it is done
     struct Stats {
         uint64_t view_start, pass_start;
+        uint64_t view_end;  // 0 while the view is calculated
+        int pass_count;
         int pass_pixels;
         int ref_orbits, ref_iterations;
         uint64_t ref_us, search_us;
@@ -179,7 +193,8 @@ private:
     } stats;
     uint64_t now_us() const { return clock_us ? clock_us() : 0; }
     void log_pass(const char* name);
-    void print_stats();
+    // The view is done: stops its clock and prints the statistics
+    void finish_stats();
     int pass_resolved;  // pixels that escaped in the current pass
     int pass_ran_out;   // pixels that reached the limit of the current pass without being proven to be in the set
     View pass_view;

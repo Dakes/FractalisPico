@@ -16,17 +16,18 @@ public:
      * it waits for the calculation to finish first or keeps going (fly).
      */
     void dive(uint32_t now_ms);
-    void next_speed();
-    const char* speed_name() const;
+    // Zoom per step
     int speed_index() const { return speed; }
     void set_speed(int index);
+    static int speed_count();
+    static const char* speed_name(int index);
     // Time to look at a finished view before the next step (fly doesn't wait)
-    void next_pause();
-    const char* pause_name() const;
     int pause_index() const { return pause; }
     void set_pause(int index);
+    static int pause_count();
+    static const char* pause_name(int index);
     // Waits for supersampling as well before the next step
-    void toggle_full_quality();
+    void set_full_quality(bool on) { state->auto_zoom_full_quality = on; }
     bool full_quality() const { return state->auto_zoom_full_quality; }
     // Seconds until the next step during a pause, 0 otherwise
     uint32_t seconds_to_next_step(uint32_t now_ms) const;
