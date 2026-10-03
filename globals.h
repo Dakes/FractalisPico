@@ -8,6 +8,8 @@
 #define UPDATE_SLEEP 16
 #define FRAME_INTERVAL_MS 100    // Time between display refreshes while calculating
 #define ANIMATION_INTERVAL_MS 33 // Time between display refreshes during color animations
+// ... while a view is being calculated: a frame takes core0 ~30 ms, it calculates in between
+#define ANIMATION_INTERVAL_CALCULATING_MS 100
 #define CORE0_WORK_MS 20         // How long core0 helps calculating before it checks input again
 #define COLOR_CYCLE_SPEED 0.04f  // Palette cycles per second during auto zoom. 0 = off
 
@@ -20,23 +22,25 @@
 #define USB_WAIT_MS 1000
 
 // The settings and the view are saved to the flash this long after the last button press, if anything changed
-#define SAVE_DELAY_MS 5000
+#define SAVE_DELAY_MS 300000
 // During auto zoom the view is saved at most this often
-#define AUTO_ZOOM_SAVE_INTERVAL_MS 60000
+#define AUTO_ZOOM_SAVE_INTERVAL_MS 300000
 
 // Button timings
 #define BUTTON_SAMPLE_MS 2
 #define BUTTON_DEBOUNCE_SAMPLES 4
 #define LONG_PRESS_MS 350
-#define DOUBLE_TAP_MS 300        // A tap followed by a press within this time selects the second function layer
+// A tap followed by a press within this time selects the next function layer. Starts again with every tap.
+#define DOUBLE_TAP_MS 300
 #define REPEAT_MS 250            // Repeat interval of long press actions while the button is held
 #define TEST_JUMP_HOLD_MS 2000   // Holding A + B this long jumps to the next deep test location
 
 #define PAN_CONSTANT 0.1
 #define ZOOM_CONSTANT 0.1
 
+// Highest iteration limit. The reference orbit needs 8 bytes per iteration.
 #ifndef MAX_ITER
-#define MAX_ITER 10000
+#define MAX_ITER 16000
 #endif
 
 // Precision switches. Float is by far the fastest on the RP2350 (single precision FPU), double is a good bit
@@ -60,11 +64,17 @@
 #define PRECISION_MAX_ZOOM 1e70
 // Above this zoom level the main cardioid/bulb check and periodicity checks are not precise enough
 #define OPTIMIZATIONS_MAX_ZOOM 1e7
+// Pixels that haven't escaped at the limit of the current pass are shown as part of the set (black), so the set
+// starts out too big and shrinks to its real shape with every pass. false: they keep the preview color until the
+// last pass.
+#ifndef UNDECIDED_IN_SET
+#define UNDECIDED_IN_SET true
+#endif
 // Every calculation starts with a low iteration limit, which doubles with every pass
 #define FIRST_PASS_ITER 32
 // After reaching the normal limit, keep doubling it while a pass still resolves at least this many pixels
 #ifndef REFINE_MIN_PIXELS
-#define REFINE_MIN_PIXELS 100
+#define REFINE_MIN_PIXELS 768  // 1% of the screen
 #endif
 // ... up to this factor of the normal limit
 #define REFINE_MAX_FACTOR 8

@@ -76,7 +76,7 @@ void AutoZoom::dive(uint32_t now_ms) {
     const Speed& s = SPEEDS[speed];
     // Supersampling only counts with full quality, otherwise the next step cancels it
     bool calculating = state->calculating != 0 && (state->auto_zoom_full_quality || !state->supersampling);
-    int needed_limit = static_cast<int>(s.detail * fractalis->max_iterations(state->zoom_factor));
+    int needed_limit = static_cast<int>(s.detail * fractalis->target_iterations());
     bool ready = !calculating || (s.detail < 1.0f && state->completed_limit >= needed_limit);
     if (!state->auto_zoom || !ready) {
         next_step_ms = 0;

@@ -259,12 +259,62 @@ void Palette::render(PixelState* const* pixels, int width, int height, uint16_t*
     render_rows(pixels, width, height, 0, height, frame_buffer);
 }
 
+// The value a pixel is drawn with: its own, or blended from the calculated points around it if it isn't calculated
+// yet. The image gets sharper with every finer grid (see Fractalis::next_in_order()).
+static PixelState displayed(PixelState* const* pixels, int width, int height, int x, int y,
+                            const ScreenRect* content) {
+    const PixelState& own = pixels[y][x];
+    if (own.isValid()) return own;
+    PixelState p = own;
+    uint32_t position;
+    Blend blend = interpolated_position(pixels, width, height, x, y, position);
+    if (blend == Blend::COLOR) {
+        p.setEscaped(position);
+    } else if (blend == Blend::NONE) {
+        bool uncovered = content && !content->empty()
+                         && (x < content->x0 || x >= content->x1 || y < content->y0 || y >= content->y1);
+        const PixelState* near = uncovered ? nullptr : nearest_calculated(pixels, width, height, x, y, false);
+        if (near) {
+            p = *near;
+        } else if (uncovered) {
+            // Uncovered by a pan or zoom out and nothing calculated nearby yet: the edge of the old content,
+            // blended between points every EDGE_STEP pixels, so it continues softly instead of in stripes
+            constexpr int EDGE_STEP = 16;
+            int gx = (x / EDGE_STEP) * EDGE_STEP, gy = (y / EDGE_STEP) * EDGE_STEP;
+            float fx = static_cast<float>(x - gx) / EDGE_STEP, fy = static_cast<float>(y - gy) / EDGE_STEP;
+            float sum = 0, weight_sum = 0;
+            for (int j = 0; j < 2; ++j) {
+                for (int i = 0; i < 2; ++i) {
+                    int ex = std::max(content->x0, std::min(gx + i * EDGE_STEP, content->x1 - 1));
+                    int ey = std::max(content->y0, std::min(gy + j * EDGE_STEP, content->y1 - 1));
+                    const PixelState& edge = pixels[ey][ex];
+                    if (!edge.showsColor()) continue;
+                    float w = (i ? fx : 1 - fx) * (j ? fy : 1 - fy);
+                    sum += w * static_cast<float>(edge.position());
+                    weight_sum += w;
+                }
+            }
+            if (weight_sum > 0) p.setEscaped(static_cast<uint32_t>(sum / weight_sum));
+        }
+    }
+    return p;
+}
+
 void Palette::render_rows(PixelState* const* pixels, int width, int height, int first_row, int rows,
-                          uint16_t* out_rows) const {
+                          uint16_t* out_rows, const ScreenRect* content) const {
     const int64_t start = static_cast<int64_t>(range_start);
+    // The displayed values of the row and the one below, for the shading. Static: too big for the stack, and only
+    // core0 draws.
+    static PixelState rows_buffer[2][MAX_WIDTH];
+    if (width > MAX_WIDTH) return;
+    PixelState* row = rows_buffer[0];
+    PixelState* below = rows_buffer[1];
+    auto fill = [&](PixelState* out, int y) {
+        for (int x = 0; x < width; ++x) out[x] = displayed(pixels, width, height, x, y, content);
+    };
+    fill(row, first_row);
     for (int y = first_row; y < first_row + rows; ++y) {
-        const PixelState* row = pixels[y];
-        const PixelState* below = pixels[y + 1 < height ? y + 1 : y - 1];
+        fill(below, y + 1 < height ? y + 1 : y - 1);
         float dir_y = y + 1 < height ? 1.0f : -1.0f;
         uint16_t* out = out_rows + (y - first_row) * width;
 
@@ -317,6 +367,7 @@ void Palette::render_rows(PixelState* const* pixels, int width, int height, int 
             // The display expects big endian
             out[x] = static_cast<uint16_t>((c >> 8) | (c << 8));
         }
+        std::swap(row, below);
     }
 }
 

@@ -23,9 +23,18 @@ struct Settings {
     uint8_t auto_zoom_speed;
     uint8_t auto_zoom_pause;
     uint8_t auto_zoom_full_quality;
-    uint8_t reserved[4];
+    // Added later, 0 is the default (older records have 0 there)
+    uint8_t show_probes;
+    uint8_t supersample_right_away;
+    uint8_t set_display_preview;  // 0: undecided pixels are part of the set, 1: they keep the preview color
+    uint8_t reserved[1];
+    // Saved views, zoom 0 = empty. Added later: records without them load with empty slots.
+    struct Slot {
+        Coordinate center;
+        double zoom;
+    } slots[2];
 };
-static_assert(sizeof(Settings) == 88, "Settings must not contain padding");
+static_assert(sizeof(Settings) == 232, "Settings must not contain padding");
 
 /**
  * Stores the settings in the last sectors of the flash. Every save appends a record of one flash page, the newest

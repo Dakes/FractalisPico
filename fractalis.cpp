@@ -15,6 +15,7 @@ struct Escape {
     bool in_set;
     bool aborted;
     float trap = INFINITY;  // orbit trap: smallest squared distance of the orbit to the trap shape
+    bool proven = false;    // in the set because the orbit was found to repeat, not because it reached the limit
 };
 
 /**
@@ -117,7 +118,7 @@ Escape iterate(T cr, T ci, int iter_limit, T epsilon, bool check_periodicity, fl
         }
         if (check_periodicity) {
             if (std::abs(zr - saved_r) + std::abs(zi - saved_i) < epsilon) {
-                return {iter_limit, 0.0f, true, false, trap};
+                return {iter_limit, 0.0f, true, false, trap, true};
             }
             if (n == save_at) {
                 saved_r = zr;
@@ -423,7 +424,7 @@ Escape iterate_perturbed(const float* orbit, int orbit_length, T dcr, T dci, int
         float ref_r = orbit[2 * m], ref_i = orbit[2 * m + 1];
         if (ref_r == saved_zr && ref_i == saved_zi && std::abs(dzr - saved_dzr) + std::abs(dzi - saved_dzi) < epsilon
                 && std::abs(dzr) + std::abs(dzi) < max_compared_dz) {
-            return {iter_limit, 0.0f, true, false, trap};
+            return {iter_limit, 0.0f, true, false, trap, true};
         }
         if (n == save_at) {
             saved_zr = ref_r;
@@ -545,7 +546,7 @@ Escape iterate_perturbed_scaled(const float* orbit, int orbit_length, double dcr
         float ref_r = orbit[2 * m], ref_i = orbit[2 * m + 1];
         if (ref_r == saved_zr && ref_i == saved_zi && e == saved_e
                 && std::abs(wr - saved_wr) + std::abs(wi - saved_wi) < epsilon && size < max_compared) {
-            return {iter_limit, 0.0f, true, false, trap};
+            return {iter_limit, 0.0f, true, false, trap, true};
         }
         if (n == save_at) {
             saved_zr = ref_r;
@@ -567,10 +568,50 @@ Fractalis::Fractalis(FractalisState* state)
     ref = {};
     // Z_0 .. Z_MAX_ITER
     ref.orbit = new float[2 * (MAX_ITER + 1)];
+
+    // Probe points: the center 3x3 at every pixel, then 9x9 points at every 2nd pixel, then rings of 9x9 points
+    // with twice the distance each, until they cover the screen
+    probe_count = 0;
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) probes[probe_count++] = {static_cast<int16_t>(dx), static_cast<int16_t>(dy)};
+    }
+    const int half = std::max(state->screen_w, state->screen_h) / 2;
+    for (int step = 2; 2 * step <= half && probe_count < MAX_PROBES; step *= 2) {
+        // The inner points are already there from the finer level before
+        const int inner = step == 2 ? 0 : 2;
+        for (int j = -4; j <= 4; ++j) {
+            for (int i = -4; i <= 4; ++i) {
+                if (std::abs(i) <= inner && std::abs(j) <= inner) continue;
+                if (std::abs(i * step) * 2 > state->screen_w || std::abs(j * step) * 2 > state->screen_h) continue;
+                if (probe_count < MAX_PROBES) {
+                    probes[probe_count++] = {static_cast<int16_t>(i * step), static_cast<int16_t>(j * step)};
+                }
+            }
+        }
+    }
 }
 
 Fractalis::~Fractalis() {
     delete[] ref.orbit;
+}
+
+uint64_t (*Fractalis::clock_us)() = nullptr;
+
+void Fractalis::log_pass(const char* name) {
+    if (!clock_us) return;
+    int left = static_cast<int>(sizeof(stats.passes)) - stats.passes_length;
+    if (left <= 1) return;
+    int n = snprintf(stats.passes + stats.passes_length, left, "%s%d:%lums/%dpx ", name, pass_limit,
+                     static_cast<unsigned long>((now_us() - stats.pass_start) / 1000), stats.pass_pixels);
+    stats.passes_length += std::max(0, std::min(n, left - 1));
+}
+
+void Fractalis::print_stats() {
+    if (!clock_us) return;
+    printf("Stats: %lu ms | %s| reference: %d orbits, %d iterations, %lu ms, search %lu ms\n",
+           static_cast<unsigned long>((now_us() - stats.view_start) / 1000), stats.passes, stats.ref_orbits,
+           stats.ref_iterations, static_cast<unsigned long>(stats.ref_us / 1000),
+           static_cast<unsigned long>(stats.search_us / 1000));
 }
 
 int Fractalis::max_iterations(double zoom) const {
@@ -580,7 +621,7 @@ int Fractalis::max_iterations(double zoom) const {
 }
 
 bool Fractalis::calculate_pixel(int x, int y, const View& view, int iter_limit, uint32_t id, bool (*interrupt)(),
-                                PixelState& pixel, float sub_x, float sub_y) const {
+                                PixelState& pixel, float sub_x, float sub_y, PixelInfo* info) const {
     auto abort = [this, id, interrupt]() {
         return state->calculation_id != id || (interrupt && interrupt());
     };
@@ -596,13 +637,13 @@ bool Fractalis::calculate_pixel(int x, int y, const View& view, int iter_limit, 
         float ci = view.center_if + ((y + 0.5f + sub_y - state->screen_h / 2.0f) * view.step_f + view.center_if_low);
         bool interior = is_in_main_bulb(cr, ci);
         if (interior && !trapped) {
-            escape = {iter_limit, 0.0f, true, false};
+            escape = {iter_limit, 0.0f, true, false, INFINITY, true};
         } else {
             escape = with_trap(view.trap, [&](auto trap) {
                 return iterate<decltype(trap)::value>(cr, ci, interior ? interior_limit : iter_limit,
                                                       view.step_f * 1e-3f, true, view.step_f, abort);
             });
-            if (interior) escape.in_set = true;
+            if (interior) escape.in_set = escape.proven = true;
         }
     } else {
         // Offset from the center in the complex plane. Exact enough in double, even for deep zooms.
@@ -626,7 +667,7 @@ bool Fractalis::calculate_pixel(int x, int y, const View& view, int iter_limit, 
         int limit = interior ? interior_limit : iter_limit;
 
         if (interior && !trapped) {
-            escape = {iter_limit, 0.0f, true, false};
+            escape = {iter_limit, 0.0f, true, false, INFINITY, true};
         } else if (view.perturbed) {
             double dcr = view.ref_offset_r + offset_r;
             double dci = view.ref_offset_i + offset_i;
@@ -657,11 +698,15 @@ bool Fractalis::calculate_pixel(int x, int y, const View& view, int iter_limit, 
                 return iterate_dd<decltype(trap)::value>(re, im, limit, view.step_f, abort);
             });
         }
-        if (interior) escape.in_set = true;
+        if (interior) escape.in_set = escape.proven = true;
     }
 
     if (escape.aborted) {
         return false;
+    }
+    if (info) {
+        info->iterations = escape.iterations;
+        info->ran_out = escape.in_set && !escape.proven;
     }
 
     if (trapped) {
@@ -751,51 +796,75 @@ bool Fractalis::claim_pixel(int& x, int& y) {
         returned_count--;
         x = returned[returned_count].x;
         y = returned[returned_count].y;
-        if (needs_work(state->pixelState[y][x])) {
+        if (probe_pass || needs_work(state->pixelState[y][x])) {
             return true;
         }
     }
 
-    // Pixels are handed out in square rings around the screen center.
-    // Ring r > 0 starts at index (2r - 1)^2 and has 4 sides with 2r pixels each.
+    if (probe_pass) {
+        const int cx = state->screen_w / 2;
+        const int cy = state->screen_h / 2;
+        // All of them, also the ones that are already done: their iterations are needed
+        while (next_index < probe_count) {
+            const PixelPosition& p = probes[next_index++];
+            x = cx + p.x;
+            y = cy + p.y;
+            if (x >= 0 && x < state->screen_w && y >= 0 && y < state->screen_h) return true;
+        }
+        return false;
+    }
+
+    while (next_in_order(x, y)) {
+        if (needs_work(state->pixelState[y][x])) return true;
+    }
+    return false;
+}
+
+bool Fractalis::next_in_order(int& x, int& y) {
+    // Every pixel is on a grid around the screen center: the coarsest one of 64, 32, .. 2, 1 pixels that it is on.
+    // In grid units (i, j) it is on the square ring p = max(|i|, |j|). Pixels are handed out by p, the coarser grids
+    // first, so the whole screen is quickly covered by a coarse grid while the full resolution grows from the center.
+    static constexpr int STEPS[] = {64, 32, 16, 8, 4, 2, 1};
+    constexpr int STEP_COUNT = sizeof(STEPS) / sizeof(STEPS[0]);
     const int cx = state->screen_w / 2;
     const int cy = state->screen_h / 2;
     const int max_radius = std::max(std::max(cx, state->screen_w - cx), std::max(cy, state->screen_h - cy));
-    const int total = (2 * max_radius + 1) * (2 * max_radius + 1);
-
-    while (next_index < total) {
-        int index = next_index++;
-        if (index == 0) {
-            x = cx;
-            y = cy;
-        } else {
-            int r = (static_cast<int>(std::sqrt(static_cast<float>(index))) + 1) / 2;
-            // fix possible rounding errors of the float sqrt
-            while ((2 * r + 1) * (2 * r + 1) <= index) r++;
-            while ((2 * r - 1) * (2 * r - 1) > index) r--;
-            int side_length = 2 * r;
-            int offset = index - (2 * r - 1) * (2 * r - 1);
-            int side = offset / side_length;
-            int pos = offset % side_length;
-            switch (side) {
-                case 0: x = cx - r + pos; y = cy - r; break;  // top, left to right
-                case 1: x = cx + r; y = cy - r + pos; break;  // right, top to bottom
-                case 2: x = cx + r - pos; y = cy + r; break;  // bottom, right to left
-                default: x = cx - r; y = cy + r - pos; break; // left, bottom to top
-            }
-            bool horizontal = side == 0 || side == 2;
-            if (horizontal && (y < 0 || y >= state->screen_h)) {
-                // skip the rest of this side
-                next_index = index - pos + side_length;
-                continue;
-            }
-        }
-        if (x < 0 || x >= state->screen_w || y < 0 || y >= state->screen_h) {
+    if (order_p == 0) {
+        order_p = 1;
+        order_step = 0;
+        order_k = 0;
+        x = cx;
+        y = cy;
+        return true;
+    }
+    while (order_p <= max_radius) {
+        if (order_step == STEP_COUNT) {
+            order_p++;
+            order_step = 0;
+            order_k = 0;
             continue;
         }
-        if (needs_work(state->pixelState[y][x])) {
-            return true;
+        const int s = STEPS[order_step];
+        if (order_k >= 8 * order_p || order_p * s > max_radius) {
+            // ring done or completely outside of the screen
+            order_step++;
+            order_k = 0;
+            continue;
         }
+        int k = order_k++;
+        int side = k / (2 * order_p), pos = k % (2 * order_p);
+        int i, j;
+        switch (side) {
+            case 0: i = -order_p + pos; j = -order_p; break;
+            case 1: i = order_p; j = -order_p + pos; break;
+            case 2: i = order_p - pos; j = order_p; break;
+            default: i = -order_p; j = order_p - pos; break;
+        }
+        // On a coarser grid as well: that one has it
+        if (s < STEPS[0] && i % 2 == 0 && j % 2 == 0) continue;
+        x = cx + i * s;
+        y = cy + j * s;
+        if (x >= 0 && x < state->screen_w && y >= 0 && y < state->screen_h) return true;
     }
     return false;
 }
@@ -831,26 +900,78 @@ void Fractalis::start_pass() {
         keep_reference = std::abs(dx) < state->screen_w && std::abs(dy) < state->screen_w;
     }
 
-    int target = max_iterations(state->zoom_factor);
-    int first;
-    if (first_limit_hint > 0) {
-        // Most pixels escape around the hint, lower passes would only show the preview again
-        first = std::max(FIRST_PASS_ITER, std::min(first_limit_hint, target));
-        if (first * 3 / 2 >= target) first = target;
-    } else {
-        first = next_pass_limit(std::max(FIRST_PASS_ITER, target / 16) / 2, target);
+    stats = {};
+    stats.view_start = now_us();
+
+    // First the probe points, they set the target of the view (begin_view_passes). Right after a pan or zoom twice
+    // the limit of the view before is enough, otherwise the highest limit.
+    probe_pass = true;
+    probe_escaped = 0;
+    probe_ran_out = 0;
+    int probe_limit = MAX_ITER;
+    if (first_limit_hint > 0 && last_view_limit > 0) {
+        probe_limit = std::min(MAX_ITER, 2 * std::max(last_view_limit, max_iterations(pass_view.zoom)));
     }
-    begin_pass(first, target);
+    view_target = probe_limit;
+    begin_pass(probe_limit, probe_limit);
     // (begin_pass already chose a new one, if the kept orbit is too short)
     if (pass_view.perturbed && !keep_reference && ref.tries == 0) {
         choose_reference();
     }
 }
 
+int Fractalis::probe_percentile(float share) const {
+    // probe_results is sorted by iterations
+    int total = 0;
+    for (int i = 0; i < probe_escaped; ++i) total += probe_results[i].weight;
+    int sum = 0;
+    for (int i = 0; i < probe_escaped; ++i) {
+        sum += probe_results[i].weight;
+        if (sum >= share * total) return probe_results[i].iterations;
+    }
+    return probe_escaped > 0 ? probe_results[probe_escaped - 1].iterations : 0;
+}
+
+void Fractalis::begin_view_passes() {
+    // The target: most escaping probes are done there. Probes that didn't escape even at the highest limit are
+    // in the set as far as this program can tell, they don't need a higher target.
+    int target;
+    int p95 = 0;
+    if (probe_escaped > 0) {
+        std::sort(probe_results, probe_results + probe_escaped,
+                  [](const ProbeResult& a, const ProbeResult& b) { return a.iterations < b.iterations; });
+        p95 = probe_percentile(0.95f);
+        target = p95 + p95 / 4;
+    } else {
+        target = max_iterations(pass_view.zoom);
+    }
+    // At least the estimate from the zoom: where the probes escape early (zoomed out), it still shows the border of
+    // the set with enough detail
+    target = std::max(target, max_iterations(pass_view.zoom));
+    target = std::max(2 * FIRST_PASS_ITER, std::min(target, MAX_ITER));
+    view_target = target;
+    printf("Probes: %d escaped (95%% by %d), %d undecided -> target %d\n", probe_escaped, p95, probe_ran_out,
+           target);
+
+    int first;
+    if (first_limit_hint > 0) {
+        // Most pixels escape around the hint, lower passes would only show the preview again
+        first = std::max(FIRST_PASS_ITER, std::min(first_limit_hint, target));
+        if (first * 3 / 2 >= target) first = target;
+    } else if (probe_escaped > 0) {
+        // Below the point where the first few percent of the probes escape, a pass would only draw black
+        first = std::max(FIRST_PASS_ITER, std::min(probe_percentile(0.05f), target));
+        if (first * 3 / 2 >= target) first = target;
+    } else {
+        first = next_pass_limit(std::max(FIRST_PASS_ITER, target / 16) / 2, target);
+    }
+    begin_pass(first, target);
+}
+
 int Fractalis::estimate_first_limit() const {
     // Orbit trap positions say nothing about the iterations
     if (trap_mode != TRAP_OFF) return 0;
-    // Median of the smooth iteration counts on screen, from a histogram of the palette positions
+    // From the distribution of the smooth iteration counts on screen, a histogram of the palette positions
     // (t = log(1 + smooth) / 2, the upper 8 bit of PixelState::color are t * 16)
     constexpr int BINS = 128;
     uint16_t histogram[BINS] = {};
@@ -865,7 +986,8 @@ int Fractalis::estimate_first_limit() const {
     }
     if (count < 100) return 0;
     int bin = 0;
-    for (int sum = 0; bin < BINS - 1 && (sum += histogram[bin]) < count / 2; ++bin) {}
+    // Where 3/4 of the pixels escaped: the first pass shows most of the image, only a quarter is calculated again
+    for (int sum = 0; bin < BINS - 1 && (sum += histogram[bin]) < count * 3 / 4; ++bin) {}
     float t = (bin + 1) / 16.0f;
     float smooth = std::exp(2.0f * t) - 1.0f;
     return static_cast<int>(smooth * 1.25f);
@@ -881,17 +1003,23 @@ void Fractalis::begin_pass(int limit, int target) {
     pass_limit = limit;
     pass_target = target;
     pass_resolved = 0;
+    pass_ran_out = 0;
     next_index = 0;
-    state->iteration_limit = limit;
+    order_p = 0;
+    stats.pass_start = now_us();
+    stats.pass_pixels = 0;
+    if (!probe_pass) state->iteration_limit = limit;
     if (pass_view.perturbed) {
         ref.tries = 0;
         ref.best_length = 0;
-        if (ref.escaped && ref.length <= limit) {
-            // The reference escapes too early for this pass, take one of the pixels that are still undecided
+        if (ref.escaped && ref.length <= limit && !probe_pass) {
+            // The reference escapes too early for this pass, take one of the pixels that are still undecided. Not
+            // for the probes: they only measure, rebasing covers the rest of their orbit.
             choose_reference();
         }
     }
-    printf("Starting pass %lu with iteration limit %d\n", static_cast<unsigned long>(pass_id), limit);
+    printf("Starting %s %lu with iteration limit %d\n", probe_pass ? "probes of view" : "pass",
+           static_cast<unsigned long>(pass_id), limit);
 }
 
 void Fractalis::finish_pass() {
@@ -902,14 +1030,26 @@ void Fractalis::finish_pass() {
         state->passes_completed++;
         state->needs_redraw = true;
         printf("Supersampling complete\n");
+        log_pass("ss");
+        print_stats();
+        return;
+    }
+    if (probe_pass) {
+        log_pass("probes");
+        probe_pass = false;
+        begin_view_passes();
+        state->needs_redraw = true;
         return;
     }
 
-    // Count the pixels that are still undecided
+    // Count the pixels that are still undecided. Supersampled right away: also the ones with sub-samples in the set,
+    // a higher limit can change their share.
+    const bool right_away = right_away_pass();
+    auto undecided = [right_away](const PixelState& p) { return p.isInSet() || (right_away && p.coverage() > 0); };
     int unresolved = 0;
     for (int y = 0; y < state->screen_h; ++y) {
         for (int x = 0; x < state->screen_w; ++x) {
-            if (state->pixelState[y][x].isInSet()) unresolved++;
+            if (undecided(state->pixelState[y][x])) unresolved++;
         }
     }
 
@@ -918,9 +1058,12 @@ void Fractalis::finish_pass() {
         if (pass_limit < pass_target) {
             next_limit = next_pass_limit(pass_limit, pass_target);
         } else {
-            // Keep refining while the higher limits still reveal new details
-            int max_target = std::min(MAX_ITER, max_iterations(pass_view.zoom) * REFINE_MAX_FACTOR);
-            if (!state->auto_zoom && pass_limit < max_target && pass_resolved >= REFINE_MIN_PIXELS) {
+            // Keep refining while the higher limits still reveal new details, or while a big part of the screen
+            // reached the limit without being proven to be in the set and they still escape with higher limits
+            bool unexplained = pass_ran_out * 4 > state->screen_w * state->screen_h && pass_resolved * 100 >= pass_ran_out;
+            int max_target = unexplained ? MAX_ITER : std::min(MAX_ITER, view_target * REFINE_MAX_FACTOR);
+            if (pass_limit < max_target
+                    && (unexplained || (!state->auto_zoom && pass_resolved >= REFINE_MIN_PIXELS))) {
                 pass_target = std::min(pass_limit * 2, max_target);
                 next_limit = pass_target;
             }
@@ -930,11 +1073,11 @@ void Fractalis::finish_pass() {
     for (int y = 0; y < state->screen_h; ++y) {
         for (int x = 0; x < state->screen_w; ++x) {
             PixelState& pixel = state->pixelState[y][x];
-            if (!pixel.isInSet()) continue;
+            if (!undecided(pixel)) continue;
             if (next_limit) {
                 // Pixels that escaped keep their value with a higher limit, only these need another pass
                 pixel.markIncomplete();
-            } else {
+            } else if (pixel.isInSet()) {
                 // Final: in the set, no more preview colors. With an orbit trap they are the trap colors.
                 if (pass_view.trap == TRAP_OFF) pixel.dropPreviewColor();
             }
@@ -942,27 +1085,72 @@ void Fractalis::finish_pass() {
     }
 
     state->completed_limit = static_cast<uint16_t>(pass_limit);
+    log_pass("");
     if (next_limit) {
         begin_pass(next_limit, pass_target);
     } else {
         printf("Calculation complete at iteration limit %d\n", pass_limit);
-        if (ss_samples > 1 && (!state->auto_zoom || state->auto_zoom_full_quality)) {
+        last_view_limit = pass_limit;
+        if (ss_samples > 1 && !right_away && (!state->auto_zoom || state->auto_zoom_full_quality)) {
             begin_supersampling();
         } else {
             state->calculating = 0;
+            print_stats();
         }
     }
     state->passes_completed++;
     state->needs_redraw = true;
 }
 
-void Fractalis::store_result(int x, int y, const PixelState& result) {
+void Fractalis::store_result(int x, int y, const PixelState& result, const PixelInfo& info) {
+    if (probe_pass) {
+        if (info.ran_out) {
+            probe_ran_out++;
+        } else if (!result.isInSet() && probe_escaped < MAX_PROBES) {
+            // The grid spacing of the probe ring it is on (see the constructor)
+            int distance = std::max(std::abs(x - state->screen_w / 2), std::abs(y - state->screen_h / 2));
+            int spacing = 1;
+            if (distance > 1) {
+                spacing = 2;
+                while (spacing * 4 < distance) spacing *= 2;
+            }
+            probe_results[probe_escaped++] = {static_cast<uint16_t>(std::min(info.iterations, 65535)),
+                                              static_cast<uint16_t>(spacing * spacing)};
+        }
+        // Only measuring: the passes draw the pixel
+        if (!show_probes_) return;
+    } else if (!ss_pass && info.ran_out) {
+        pass_ran_out++;
+    }
+    stats.pass_pixels++;
     PixelState& target = state->pixelState[y][x];
     if (ss_pass) {
         target = result;
-    } else if (result.isInSet() && !result.showsColor() && target.showsColor()) {
-        // Undecided at this iteration limit: keep showing the zoom preview instead of black for now
+    } else if (!undecided_in_set_ && result.isInSet() && !result.showsColor() && info.ran_out
+               && target.showsColor()) {
+        // Undecided at this iteration limit: keep showing the zoom preview instead of black for now. Pixels that are
+        // proven to be in the set are black right away.
         target.setInSetKeepingPreview();
+    } else if (!undecided_in_set_ && result.isInSet() && !result.showsColor() && info.ran_out
+               && !target.isValid()) {
+        // Undecided, nothing to show yet: blended from the calculated points around it as preview, if most of them
+        // are colored. Black only once the last pass confirms it.
+        uint32_t position;
+        Blend blend = interpolated_position(state->pixelState, state->screen_w, state->screen_h, x, y, position);
+        const PixelState* near = blend == Blend::NONE
+            ? nearest_calculated(state->pixelState, state->screen_w, state->screen_h, x, y, false) : nullptr;
+        if (blend == Blend::COLOR) {
+            target.setInSetColored(position);
+        } else if (near && near->showsColor()) {
+            target.setInSetColored(near->position());
+        } else {
+            target = result;
+        }
+    } else if (right_away_pass()) {
+        // Pixels with sub-samples in the set are calculated again in the next pass. Like without supersampling, they
+        // only count as resolved when they were completely in the set before.
+        if (!result.isInSet() && (target.isInSet() || !target.isValid())) pass_resolved++;
+        target = result;
     } else {
         target = result;
         if (!result.isInSet()) pass_resolved++;
@@ -1041,6 +1229,8 @@ bool Fractalis::extend_reference(uint32_t id, int target_length, bool (*interrup
         n = ref.length;
     }
 
+    const uint64_t started = now_us();
+    const int first_n = n;
     // Nobody reads the orbit while it is not ready
     float* orbit = ref.orbit;
     if (n == 0) {
@@ -1086,6 +1276,9 @@ bool Fractalis::extend_reference(uint32_t id, int target_length, bool (*interrup
     {
         LockGuard guard(lock);
         ref.busy = false;
+        stats.ref_us += now_us() - started;
+        stats.ref_iterations += n - first_n;
+        if (first_n == 0) stats.ref_orbits++;
         if (ref.generation != generation) {
             return true;  // a new C was chosen in the mean time
         }
@@ -1095,7 +1288,7 @@ bool Fractalis::extend_reference(uint32_t id, int target_length, bool (*interrup
         ref.zr = zr;
         ref.zi = zi;
 
-        if (escaped && n <= pass_limit && id == pass_id && pass_view.perturbed) {
+        if (escaped && n <= pass_limit && id == pass_id && pass_view.perturbed && !probe_pass) {
             // Pixels that need more iterations than the reference has would lose their precision
             if (n > ref.best_length) {
                 ref.best_length = n;
@@ -1122,12 +1315,14 @@ bool Fractalis::extend_reference(uint32_t id, int target_length, bool (*interrup
     auto check_interrupt = [&]() {
         return interrupted = interrupt && interrupt();
     };
+    const uint64_t search_started = now_us();
     Minibrot minibrot;
     bool found = find_minibrot(cr, ci, period_guess, minibrot, check_interrupt);
     // The last orbit value is close to the attracting cycle
     double radius = found && !interrupted ? interior_radius(zr, zi, cr, ci, minibrot.period, check_interrupt) : 0;
 
     LockGuard guard(lock);
+    stats.search_us += now_us() - search_started;
     if (ref.generation == generation) {
         if (interrupted) {
             ref.minibrot = Reference::MINIBROT_UNKNOWN;  // try again
@@ -1156,12 +1351,14 @@ bool Fractalis::work(bool (*interrupt)()) {
     // Pixels are claimed in small batches, to keep the locking overhead low for fast pixels
     int xs[MAX_BATCH], ys[MAX_BATCH];
     PixelState results[MAX_BATCH];
+    PixelInfo infos[MAX_BATCH] = {};
     int count = 0;
     uint32_t id;
     View view;
     int iter_limit;
     bool calculate_reference = false;
     bool supersampling = false;
+    bool right_away = false;
     {
         LockGuard guard(lock);
         if (state->calculating == 0) {
@@ -1196,9 +1393,10 @@ bool Fractalis::work(bool (*interrupt)()) {
         int batch = pass_view.zoom < FLOAT_MAX_ZOOM ? MAX_BATCH
                   : pass_view.perturbed ? 8
                   : pass_view.zoom < DOUBLE_MAX_ZOOM ? 4 : 1;
-        if (ss_pass) {
+        if (ss_pass || right_away_pass()) {
             batch = std::max(1, batch / (ss_samples - 1));  // every pixel is several samples
         }
+        right_away = right_away_pass();
         supersampling = ss_pass;
         while (count < batch && claim_pixel(xs[count], ys[count])) {
             if (supersampling) {
@@ -1239,7 +1437,12 @@ bool Fractalis::work(bool (*interrupt)()) {
     while (done < count) {
         bool calculated = supersampling
             ? supersample_pixel(xs[done], ys[done], view, iter_limit, id, interrupt, results[done])
-            : calculate_pixel(xs[done], ys[done], view, iter_limit, id, interrupt, results[done]);
+            : calculate_pixel(xs[done], ys[done], view, iter_limit, id, interrupt, results[done], 0.0f, 0.0f,
+                              &infos[done]);
+        // Right away: the other sub-samples as well, the pixel center is the first one
+        if (calculated && right_away) {
+            calculated = supersample_pixel(xs[done], ys[done], view, iter_limit, id, interrupt, results[done]);
+        }
         if (!calculated) break;
         done++;
     }
@@ -1251,7 +1454,7 @@ bool Fractalis::work(bool (*interrupt)()) {
         return true;
     }
     for (int i = 0; i < done; ++i) {
-        store_result(xs[i], ys[i], results[i]);
+        store_result(xs[i], ys[i], results[i], infos[i]);
     }
     // Interrupted: give the rest back, so they are calculated by the next free core
     for (int i = done; i < count && returned_count < RETURNED_CAPACITY; ++i) {
@@ -1312,6 +1515,7 @@ void Fractalis::begin_supersampling() {
     ss_pass = true;
     state->supersampling = true;
     next_index = 0;
+    order_p = 0;
     returned_count = 0;
     printf("Supersampling with %d samples per pixel\n", ss_samples);
 }
@@ -1336,6 +1540,19 @@ void Fractalis::supersample() {
     }
     begin_supersampling();
     state->calculating = 1;
+}
+
+void Fractalis::set_supersample_right_away(bool on) {
+    LockGuard guard(lock);
+    ss_right_away = on;
+    // Like a change of the supersampling: everything again, the image stays as preview
+    for (int y = 0; y < state->screen_h; ++y) {
+        for (int x = 0; x < state->screen_w; ++x) {
+            state->pixelState[y][x].markIncomplete();
+        }
+    }
+    first_limit_hint = estimate_first_limit();
+    request_calculation();
 }
 
 void Fractalis::set_orbit_trap(int trap) {

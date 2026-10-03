@@ -77,6 +77,80 @@ struct PixelState {
     void clear() { color = 0; flags = 0; fine = 0; }
 };
 
+// Area of the screen [x0, x1) x [y0, y1)
+struct ScreenRect {
+    int x0, y0, x1, y1;
+    bool empty() const { return x0 >= x1 || y0 >= y1; }
+};
+
+/**
+ * The pixels of a pass are calculated on grids around the screen center, coarse to fine (see
+ * Fractalis::next_in_order()). Pixels without a value yet show the nearest calculated point of the finest grid that
+ * has one. colored: only points that show a color count. nullptr if there is none.
+ */
+inline const PixelState* nearest_calculated(PixelState* const* pixels, int width, int height, int x, int y,
+                                            bool colored) {
+    const int cx = width / 2, cy = height / 2;
+    for (int step = 2; step <= 64; step *= 2) {
+        // Nearest grid point, also for negative offsets
+        int gx = cx + ((x - cx + step / 2 + 64 * step) / step - 64) * step;
+        int gy = cy + ((y - cy + step / 2 + 64 * step) / step - 64) * step;
+        // At the edges the nearest one can be off the screen, then the one on this side
+        if (gx >= width) gx -= step;
+        if (gy >= height) gy -= step;
+        if (gx < 0) gx += step;
+        if (gy < 0) gy += step;
+        if (gx < 0 || gx >= width || gy < 0 || gy >= height) continue;
+        const PixelState& p = pixels[gy][gx];
+        if (colored ? p.showsColor() : p.isValid()) return &p;
+    }
+    return nullptr;
+}
+
+/**
+ * Smoother than nearest_calculated(): the palette position blended between the 4 calculated points around the
+ * pixel, on the finest grid where all of them are done. Points in the set count as black: if they weigh more than
+ * the colored ones, the pixel is black.
+ */
+enum class Blend { NONE, IN_SET, COLOR };  // no grid done around it yet / all 4 points in the set / position set
+inline Blend interpolated_position(PixelState* const* pixels, int width, int height, int x, int y,
+                                  uint32_t& position) {
+    const int cx = width / 2, cy = height / 2;
+    for (int step = 2; step <= 64; step *= 2) {
+        // The grid cell around the pixel
+        int x0 = cx + ((x - cx + 64 * step) / step - 64) * step;
+        int y0 = cy + ((y - cy + 64 * step) / step - 64) * step;
+        if (x0 == x && y0 == y) continue;  // a point of this grid itself
+        const int xs[2] = {x0, x0 + step}, ys[2] = {y0, y0 + step};
+        const float fx = static_cast<float>(x - x0) / step, fy = static_cast<float>(y - y0) / step;
+        float sum = 0, weight_sum = 0, black = 0;
+        bool complete = true;
+        for (int j = 0; j < 2 && complete; ++j) {
+            for (int i = 0; i < 2; ++i) {
+                // Corners off the screen don't exist, the others must be calculated
+                if (xs[i] < 0 || xs[i] >= width || ys[j] < 0 || ys[j] >= height) continue;
+                const PixelState& p = pixels[ys[j]][xs[i]];
+                if (!p.isValid()) {
+                    complete = false;
+                    break;
+                }
+                float w = (i ? fx : 1 - fx) * (j ? fy : 1 - fy);
+                if (!p.showsColor()) {
+                    black += w;
+                    continue;
+                }
+                sum += w * static_cast<float>(p.position());
+                weight_sum += w;
+            }
+        }
+        if (!complete) continue;
+        if (weight_sum <= black) return Blend::IN_SET;
+        position = static_cast<uint32_t>(sum / weight_sum);
+        return Blend::COLOR;
+    }
+    return Blend::NONE;
+}
+
 class FractalisState {
 public:
 
@@ -96,6 +170,17 @@ public:
     int screen_w;
     int screen_h;
     PixelState** pixelState;
+    // The part of the screen that still shows the content from before the last pan or zoom (outside it, the
+    // pixels were cleared)
+    ScreenRect content;
+    // Bounding box of the pixels that have something to show
+    ScreenRect valid_bounds() const;
+    /**
+     * Pixels that aren't calculated yet are drawn blended from the calculated grid points around them. Before
+     * zooming in, that is stored in them as a preview: after the zoom the grid points are somewhere else, the
+     * pixels in between would show as dots and blocks.
+     */
+    void store_blends();
     Coordinate center;
     double zoom_factor;
     volatile bool auto_zoom;

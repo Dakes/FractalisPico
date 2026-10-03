@@ -17,6 +17,7 @@ FractalisState::FractalisState(int width, int height)
             pixelState[i][j].clear();
         }
     }
+    content = {0, 0, 0, 0};
     row_buffer = new PixelState[screen_w];
     row_buffer2 = new PixelState[screen_w];
     row_done = new bool[screen_h];
@@ -32,7 +33,42 @@ FractalisState::~FractalisState() {
     delete[] row_done;
 }
 
+void FractalisState::store_blends() {
+    for (int y = 0; y < screen_h; ++y) {
+        for (int x = 0; x < screen_w; ++x) {
+            PixelState& p = pixelState[y][x];
+            if (p.isValid()) continue;
+            uint32_t position;
+            Blend blend = interpolated_position(pixelState, screen_w, screen_h, x, y, position);
+            if (blend == Blend::COLOR) {
+                p.setEscaped(position);
+            } else if (blend == Blend::IN_SET) {
+                p.setInSet();
+            } else {
+                // Not the nearest point: as blocks they would pile up into rings with every zoom out
+                continue;
+            }
+            p.markIncomplete();
+        }
+    }
+}
+
+ScreenRect FractalisState::valid_bounds() const {
+    ScreenRect r = {screen_w, screen_h, 0, 0};
+    for (int y = 0; y < screen_h; ++y) {
+        for (int x = 0; x < screen_w; ++x) {
+            if (!pixelState[y][x].isValid()) continue;
+            r.x0 = std::min(r.x0, x);
+            r.y0 = std::min(r.y0, y);
+            r.x1 = std::max(r.x1, x + 1);
+            r.y1 = std::max(r.y1, y + 1);
+        }
+    }
+    return r;
+}
+
 void FractalisState::resetPixelComplete() {
+    content = {0, 0, 0, 0};
     for (int y = 0; y < screen_h; ++y) {
         for (int x = 0; x < screen_w; ++x) {
             pixelState[y][x].clear();
@@ -46,6 +82,9 @@ void FractalisState::shiftPixelState(int dx, int dy) {
     }
     dx = std::max(-screen_w, std::min(dx, screen_w));
     dy = std::max(-screen_h, std::min(dy, screen_h));
+    content = valid_bounds();
+    content = {std::max(0, content.x0 + dx), std::max(0, content.y0 + dy),
+               std::min(screen_w, content.x1 + dx), std::min(screen_h, content.y1 + dy)};
 
     // Horizontal shift, row by row
     if (dx != 0) {
@@ -80,6 +119,16 @@ void FractalisState::scalePixelState(double ratio) {
     const float r = static_cast<float>(ratio);
     // Position of the source in the old content, in pixel center coordinates
     auto source = [r](int i, float c) { return (i + 0.5f - c) * r + c - 0.5f; };
+    // The content moves with the zoom: the inverse of source()
+    auto target = [r](int edge, float c) { return (edge - c) / r + c; };
+    // Zooming in, the blended pixels would end up between the grid points. Zooming out they are better left to the
+    // live blending: stored, every zoom out would add another ring of coarse blends.
+    if (ratio < 1.0) store_blends();
+    content = valid_bounds();
+    content = {std::max(0, static_cast<int>(std::ceil(target(content.x0, cx)))),
+               std::max(0, static_cast<int>(std::ceil(target(content.y0, cy)))),
+               std::min(screen_w, static_cast<int>(std::floor(target(content.x1, cx)))),
+               std::min(screen_h, static_cast<int>(std::floor(target(content.y1, cy))))};
 
     // Every new pixel is interpolated from the old content (bilinear on the palette position). This is done in
     // place: when zooming in the sources lie closer to the center, so rows are processed from the outside in.

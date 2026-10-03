@@ -12,7 +12,7 @@ namespace {
 
 constexpr uint32_t MAGIC = 0x46524354;  // "FRCT"
 // Increment when the layout of Settings changes, older records are then ignored
-constexpr uint16_t VERSION = 2;
+constexpr uint16_t VERSION = 2;  // fields added at the end keep the version, older records are just shorter
 constexpr int SECTORS = 4;
 constexpr uint32_t STORAGE_SIZE = SECTORS * FLASH_SECTOR_SIZE;
 constexpr uint32_t STORAGE_OFFSET = PICO_FLASH_SIZE_BYTES - STORAGE_SIZE;
@@ -46,7 +46,7 @@ uint32_t checksum(const Record& r) {
         for (size_t i = 0; i < size; ++i) hash = (hash ^ bytes[i]) * 16777619u;
     };
     add(&r.sequence, sizeof(r.sequence));
-    add(&r.settings, sizeof(r.settings));
+    add(&r.settings, r.size <= sizeof(r.settings) ? r.size : sizeof(r.settings));
     return hash;
 }
 
@@ -106,8 +106,10 @@ bool load(Settings& out) {
     if (newest < 0) return false;
     Record r;
     memcpy(&r, slot_address(newest), sizeof(r));
-    if (r.version != VERSION || r.size != sizeof(Settings)) return false;
-    out = r.settings;
+    if (r.version != VERSION || r.size > sizeof(Settings)) return false;
+    // Fields that didn't exist yet stay 0
+    memset(&out, 0, sizeof(out));
+    memcpy(&out, &r.settings, r.size);
     return true;
 }
 

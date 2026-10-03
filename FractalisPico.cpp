@@ -48,12 +48,18 @@ extern volatile uint8_t event_head;
 extern volatile uint8_t event_tail;
 // Button feedback on the LED is shown until this time
 uint32_t led_hold_until_ms = 0;
-// Settings are saved a moment after the last button press
+// Settings are saved a while after the last button press
 uint32_t last_input_ms = 0;
+// What is in the flash
+Settings saved_settings;
+// Saved views of the save menu (X and Y)
+Settings::Slot slots[2] = {};
 // Info overlay, toggled with A
 bool hud_enabled = true;
-// While A is held, B, X and Y have other functions (layer 1). Tap and then hold A for the visual effects (layer 2),
-// tap twice and hold for more visual effects (layer 3), three times for the auto zoom settings (layer 4).
+// While A is held, B, X and Y have other functions (layer 1). Tap and then hold A for the next layers, see
+// sample_buttons().
+enum Layer : uint8_t { LAYER_MAIN = 1, LAYER_VISUAL, LAYER_LIGHT, LAYER_SUPERSAMPLING, LAYER_AUTO_ZOOM, LAYER_SAVE };
+constexpr int LAYERS = LAYER_SAVE;
 volatile uint8_t function_layer = 0;  // written by the button interrupt
 uint8_t function_mode = 0;            // what is currently displayed
 
@@ -158,11 +164,13 @@ int main() {
 
     // Holding B while powering on starts with the default settings, they are saved once B is released
     bool defaults = button_b.raw();
-    Settings saved;
+    Settings& saved = saved_settings;
     bool loaded = settings::load(saved);
+    if (DEBUG) Fractalis::clock_us = time_us_64;  // statistics per view
     fractalis.reset_view();
     if (defaults) {
         printf("B held: starting with the default settings\n");
+        memcpy(slots, saved.slots, sizeof(slots));  // the saved views stay
         led.set_rgb(255, 255, 255);
         while (button_b.raw()) sleep_ms(10);  // released before the buttons are sampled, so it doesn't pan
     } else if (loaded) {
@@ -186,6 +194,9 @@ int main() {
     uint32_t last_loop_ms = now_ms();
     uint32_t seen_calculation = 0;
     uint32_t calculation_started_ms = 0;
+    // Drawing during the calculation of a view: core0 helps calculating in between
+    uint32_t view_frames = 0;
+    uint64_t view_drawing_us = 0;
     bool was_calculating = false;
     bool was_auto_zoom = false;
     uint32_t shown_seconds_to_step = 0;
@@ -198,6 +209,8 @@ int main() {
         if (state.calculation_id != seen_calculation) {
             seen_calculation = state.calculation_id;
             calculation_started_ms = now;
+            view_frames = 0;
+            view_drawing_us = 0;
             // The full coordinates, to find the view again
             char real_text[100], imag_text[100];
             format_coordinate(state.center.real, 74, 1000, real_text, sizeof(real_text));
@@ -205,7 +218,9 @@ int main() {
             printf("View at zoom %.6e:\n  real %s\n  imag %s\n", state.zoom_factor, real_text, imag_text);
         }
         if (was_calculating && !calculating) {
-            printf("View done in %lu ms\n", static_cast<unsigned long>(now - calculation_started_ms));
+            printf("View done in %lu ms (%lu frames drawn, %lu ms drawing)\n",
+                   static_cast<unsigned long>(now - calculation_started_ms), static_cast<unsigned long>(view_frames),
+                   static_cast<unsigned long>(view_drawing_us / 1000));
         }
         was_calculating = calculating;
 
@@ -236,11 +251,16 @@ int main() {
         // Redraw right away after input, regularly while calculating or animating
         uint32_t since_frame = now - last_frame_ms;
         if (state.needs_redraw
-                || (animating && since_frame >= ANIMATION_INTERVAL_MS)
+                || (animating && since_frame >= (calculating ? ANIMATION_INTERVAL_CALCULATING_MS : ANIMATION_INTERVAL_MS))
                 || (calculating && since_frame >= FRAME_INTERVAL_MS)) {
             last_frame_ms = now;
             animating = color_palette.animate();
+            uint64_t drawing_started = time_us_64();
             update_display();
+            if (calculating) {
+                view_frames++;
+                view_drawing_us += time_us_64() - drawing_started;
+            }
         }
 
         // Without full quality, auto zoom doesn't wait for supersampling. The view is supersampled once it stops.
@@ -325,7 +345,8 @@ void update_display() {
 }
 
 void draw_strip(uint16_t* strip, int first_row, int rows) {
-    color_palette.render_rows(state.pixelState, state.screen_w, state.screen_h, first_row, rows, strip);
+    color_palette.render_rows(state.pixelState, state.screen_w, state.screen_h, first_row, rows, strip,
+                              &state.content);
     for (int i = 0; i < overlay_text_count; ++i) {
         const OverlayText& t = overlay_texts[i];
         if (t.position.y >= first_row + rows || t.position.y + t.height <= first_row)
@@ -395,44 +416,61 @@ void render_overlay() {
     int font_height = font6.height * scale;
     int margin = 5;
 
-    // Button functionalities
-    // Layer 2: visual effects, layer 3: visual effects 2, layer 4: auto zoom settings
-    char text_b2[32], text_x2[32], text_y2[32];
-    snprintf(text_b2, sizeof(text_b2), "> Shading: %s", color_palette.shading ? "on" : "off");
-    snprintf(text_x2, sizeof(text_x2), "Supersampling: %dx <", fractalis.supersampling());
-    snprintf(text_y2, sizeof(text_y2), "Color cycle: %s <", COLOR_CYCLE_NAMES[static_cast<int>(color_cycle)]);
-    char text_b3[32], text_x3[32], text_y3[32];
-    snprintf(text_b3, sizeof(text_b3), "> Bands: %s", BANDS_NAMES[bands]);
-    snprintf(text_x3, sizeof(text_x3), "Orbit trap: %s <", TRAP_NAMES[fractalis.orbit_trap()]);
-    snprintf(text_y3, sizeof(text_y3), "Light: %s <", LIGHT_NAMES[light]);
-    char text_b4[32], text_x4[32], text_y4[32];
-    snprintf(text_b4, sizeof(text_b4), "> Pause: %s", autoZoom.pause_name());
-    snprintf(text_x4, sizeof(text_x4), "Step: %s <", autoZoom.speed_name());
-    snprintf(text_y4, sizeof(text_y4), "Full quality: %s <", autoZoom.full_quality() ? "on" : "off");
+    // Button functionalities of the layer
+    char text_b_buffer[40], text_x_buffer[40], text_y_buffer[40];
     const char* text_a = "UI / hold: Fn / taps+hold: More";
     const char* text_b = "Left / hold: Down";
     const char* text_x = "Right / hold: Up";
     const char* text_y = "Zoom / hold: Out";
-    if (function_mode == 1) {
-        text_a = "[Functions]";
-        text_b = "> Reset view";
-        text_x = "Palette <";
-        text_y = state.auto_zoom ? "Auto zoom: stop <" : "Auto zoom: start <";
-    } else if (function_mode == 2) {
-        text_a = "[Visual]";
-        text_b = text_b2;
-        text_x = text_x2;
-        text_y = text_y2;
-    } else if (function_mode == 3) {
-        text_a = "[Visual 2]";
-        text_b = text_b3;
-        text_x = text_x3;
-        text_y = text_y3;
-    } else if (function_mode == 4) {
-        text_a = "[Auto zoom]";
-        text_b = text_b4;
-        text_x = text_x4;
-        text_y = text_y4;
+    auto texts = [&](const char* b_format, const char* b_value, const char* x_format, const char* x_value,
+                     const char* y_format, const char* y_value) {
+        snprintf(text_b_buffer, sizeof(text_b_buffer), b_format, b_value);
+        snprintf(text_x_buffer, sizeof(text_x_buffer), x_format, x_value);
+        snprintf(text_y_buffer, sizeof(text_y_buffer), y_format, y_value);
+        text_b = text_b_buffer;
+        text_x = text_x_buffer;
+        text_y = text_y_buffer;
+    };
+    char samples[8];
+    snprintf(samples, sizeof(samples), "%dx", fractalis.supersampling());
+    switch (function_mode) {
+        case LAYER_MAIN:
+            text_a = "[Functions]";
+            texts("> %s", "Reset view", "%s <", "Palette",
+                  "Auto zoom: %s <", state.auto_zoom ? "stop" : "start");
+            break;
+        case LAYER_VISUAL:
+            text_a = "[Visual]";
+            texts("> Bands: %s", BANDS_NAMES[bands], "Orbit trap: %s <", TRAP_NAMES[fractalis.orbit_trap()],
+                  "Color cycle: %s <", COLOR_CYCLE_NAMES[static_cast<int>(color_cycle)]);
+            break;
+        case LAYER_LIGHT:
+            text_a = "[Visual 2: Light]";
+            texts("> Shading: %s", color_palette.shading ? "on" : "off", "Light: %s <", LIGHT_NAMES[light],
+                  "Set display: %s <", fractalis.undecided_in_set() ? "shrinking" : "preview");
+            break;
+        case LAYER_SUPERSAMPLING:
+            text_a = "[Visual 3: Supersampling]";
+            texts("> Show probes: %s", fractalis.show_probes() ? "on" : "off", "Supersampling: %s <", samples,
+                  "Right away: %s <", fractalis.supersample_right_away() ? "on" : "off");
+            break;
+        case LAYER_AUTO_ZOOM:
+            text_a = "[Auto zoom]";
+            texts("> Pause: %s", autoZoom.pause_name(), "Step: %s <", autoZoom.speed_name(),
+                  "Full quality: %s <", autoZoom.full_quality() ? "on" : "off");
+            break;
+        case LAYER_SAVE: {
+            text_a = "[Save] slots: tap = go, hold = store";
+            char slot_text[2][24];
+            for (int k = 0; k < 2; ++k) {
+                if (slots[k].zoom > 0)
+                    snprintf(slot_text[k], sizeof(slot_text[k]), "x%.1e", slots[k].zoom);
+                else
+                    snprintf(slot_text[k], sizeof(slot_text[k]), "empty");
+            }
+            texts("> %s", "Save settings", "Slot 1: %s <", slot_text[0], "Slot 2: %s <", slot_text[1]);
+            break;
+        }
     }
     int32_t text_x_width = display.measure_text(text_x, scale, 1);
     int32_t text_y_width = display.measure_text(text_y, scale, 1);
@@ -484,18 +522,6 @@ void render_overlay() {
     snprintf(iterations_text, sizeof(iterations_text), "Iterations: %d (%s)", state.iteration_limit, precision);
     draw_text(iterations_text, Point(margin, info_y), scale);
 
-    info_y += font8_height + margin;
-    char palette_text[40];
-    snprintf(palette_text, sizeof(palette_text), "Palette: %s", color_palette.name());
-    draw_text(palette_text, Point(margin, info_y), scale);
-
-    if (fractalis.supersampling() > 1) {
-        info_y += font8_height + margin;
-        char ss_text[40];
-        snprintf(ss_text, sizeof(ss_text), "Supersampling: %dx%s", fractalis.supersampling(),
-                 state.supersampling ? " (working)" : "");
-        draw_text(ss_text, Point(margin, info_y), scale);
-    }
 
     if (state.auto_zoom) {
         info_y += font8_height + margin;
@@ -516,14 +542,12 @@ void update_led() {
         return;
     }
 
-    if (function_mode == 1) {
-        led.set_rgb(200, 0, 255);
-    } else if (function_mode == 2) {
-        led.set_rgb(0, 120, 255);
-    } else if (function_mode == 3) {
-        led.set_rgb(0, 220, 255);
-    } else if (function_mode == 4) {
-        led.set_rgb(255, 0, 120);
+    // One color per menu layer
+    static constexpr uint8_t LAYER_COLORS[LAYERS][3] = {
+        {200, 0, 255}, {0, 120, 255}, {0, 220, 255}, {120, 255, 0}, {255, 0, 120}, {255, 220, 0}};
+    if (function_mode >= 1 && function_mode <= LAYERS) {
+        const uint8_t* c = LAYER_COLORS[function_mode - 1];
+        led.set_rgb(c[0], c[1], c[2]);
     } else if (state.calculating) {
         led.set_rgb(255, 150, 0);
     } else {
@@ -539,9 +563,8 @@ void show_led_feedback(uint8_t r, uint8_t g, uint8_t b, uint32_t duration_ms) {
     led_hold_until_ms = now_ms() + duration_ms;
 }
 
-// Short press
-// Short press in function mode
-void function_pressed(int i) {
+// Menu layer 1 (main)
+void main_pressed(int i) {
     switch (i) {
         case 1: // Button B: back to the start
             printf("Resetting view\n");
@@ -557,15 +580,49 @@ void function_pressed(int i) {
             printf("Auto Zoom: %d\n", state.auto_zoom);
             break;
     }
-    state.needs_redraw = true;
-    show_led_feedback(255, 255, 255, 80);
 }
 
-// Short press in function layer 2 (visual effects)
-void function2_pressed(int i) {
+// Menu layer 2 (visual): how the colors come about
+void visual_pressed(int i) {
+    switch (i) {
+        case 1: // Button B: color bands, no recalculation needed
+            bands = (bands + 1) % BANDS_COUNT;
+            color_palette.set_bands(BANDS[bands]);
+            break;
+        case 2: // Button X: orbit trap, recalculates the view
+            fractalis.set_orbit_trap((fractalis.orbit_trap() + 1) % Fractalis::TRAP_COUNT);
+            printf("Orbit trap: %s\n", TRAP_NAMES[fractalis.orbit_trap()]);
+            break;
+        case 3: // Button Y: color cycling
+            color_cycle = static_cast<ColorCycle>((static_cast<int>(color_cycle) + 1) % 3);
+            break;
+    }
+}
+
+// Menu layer 3 (visual 2: light)
+void light_pressed(int i) {
     switch (i) {
         case 1: // Button B: relief shading
             color_palette.shading = !color_palette.shading;
+            break;
+        case 2: // Button X: light direction
+            light = (light + 1) % LIGHT_COUNT;
+            if (light != LIGHT_ROTATING) {
+                light_angle = LIGHT_ANGLES[light];
+                color_palette.set_light(light_angle);
+            }
+            break;
+        case 3: // Button Y: undecided pixels shown as part of the set (shrinking) or with their preview color
+            fractalis.set_undecided_in_set(!fractalis.undecided_in_set());
+            break;
+    }
+}
+
+// Menu layer 4 (visual 3: supersampling)
+void supersampling_pressed(int i) {
+    switch (i) {
+        case 1: // Button B: draw the probes right away
+            fractalis.set_show_probes(!fractalis.show_probes());
             break;
         case 2: { // Button X: supersampling 1x - 8x
             static constexpr int STEPS[] = {1, 2, 3, 4, 6, 8};
@@ -576,39 +633,15 @@ void function2_pressed(int i) {
             printf("Supersampling: %dx\n", fractalis.supersampling());
             break;
         }
-        case 3: // Button Y: color cycling
-            color_cycle = static_cast<ColorCycle>((static_cast<int>(color_cycle) + 1) % 3);
+        case 3: // Button Y: all sub-samples in every pass
+            fractalis.set_supersample_right_away(!fractalis.supersample_right_away());
+            printf("Supersampling right away: %d\n", fractalis.supersample_right_away());
             break;
     }
-    state.needs_redraw = true;
-    show_led_feedback(255, 255, 255, 80);
 }
 
-// Short press in function layer 3 (visual effects 2)
-void function3_pressed(int i) {
-    switch (i) {
-        case 1: // Button B: color bands, no recalculation needed
-            bands = (bands + 1) % BANDS_COUNT;
-            color_palette.set_bands(BANDS[bands]);
-            break;
-        case 2: // Button X: orbit trap, recalculates the view
-            fractalis.set_orbit_trap((fractalis.orbit_trap() + 1) % Fractalis::TRAP_COUNT);
-            printf("Orbit trap: %s\n", TRAP_NAMES[fractalis.orbit_trap()]);
-            break;
-        case 3: // Button Y: light direction
-            light = (light + 1) % LIGHT_COUNT;
-            if (light != LIGHT_ROTATING) {
-                light_angle = LIGHT_ANGLES[light];
-                color_palette.set_light(light_angle);
-            }
-            break;
-    }
-    state.needs_redraw = true;
-    show_led_feedback(255, 255, 255, 80);
-}
-
-// Short press in function layer 4 (auto zoom settings)
-void function4_pressed(int i) {
+// Menu layer 5 (auto zoom settings)
+void auto_zoom_pressed(int i) {
     switch (i) {
         case 1: // Button B: pause after a finished view
             autoZoom.next_pause();
@@ -622,6 +655,46 @@ void function4_pressed(int i) {
             autoZoom.toggle_full_quality();
             printf("Auto zoom full quality: %d\n", autoZoom.full_quality());
             break;
+    }
+}
+
+void save_settings_now() {
+    Settings current = current_settings();
+    if (settings::save(current)) saved_settings = current;
+}
+
+// Menu layer 6 (save). B saves the settings right away, X and Y are view slots: a tap jumps there, holding stores
+// the current view (and saves).
+void save_pressed(int i, bool held) {
+    if (i == 1) {
+        save_settings_now();
+        show_led_feedback(255, 255, 255, 300);
+    } else if (i == 2 || i == 3) {
+        Settings::Slot& slot = slots[i - 2];
+        if (held) {
+            slot = {state.center, state.zoom_factor};
+            printf("View stored in slot %d\n", i - 1);
+            save_settings_now();
+            show_led_feedback(255, 255, 255, 300);
+        } else if (slot.zoom > 0) {
+            printf("Jumping to slot %d\n", i - 1);
+            fractalis.set_view(slot.center, slot.zoom);
+            show_led_feedback(255, 255, 255, 80);
+        } else {
+            show_led_feedback(255, 0, 0, 300);  // empty
+        }
+    }
+    state.needs_redraw = true;
+}
+
+void layer_pressed(int layer, int i, bool held) {
+    switch (layer) {
+        case LAYER_MAIN: main_pressed(i); break;
+        case LAYER_VISUAL: visual_pressed(i); break;
+        case LAYER_LIGHT: light_pressed(i); break;
+        case LAYER_SUPERSAMPLING: supersampling_pressed(i); break;
+        case LAYER_AUTO_ZOOM: auto_zoom_pressed(i); break;
+        case LAYER_SAVE: save_pressed(i, held); return;  // has its own LED feedback
     }
     state.needs_redraw = true;
     show_led_feedback(255, 255, 255, 80);
@@ -673,30 +746,36 @@ void button_long_pressed(int i) {
 
 // Buttons are sampled by a timer interrupt, so short presses aren't missed while the main loop is busy.
 // The interrupt only records events, the actions run in the main loop.
-enum class ButtonEvent : uint8_t { PRESS, LONG, REPEAT, FUNCTION, FUNCTION2, FUNCTION3, FUNCTION4, TEST_JUMP };
+// FUNCTION: B, X or Y pressed while A is held, FUNCTION_LONG: held (only the save slots), both with the layer.
+enum class ButtonEvent : uint8_t { PRESS, LONG, REPEAT, FUNCTION, FUNCTION_LONG, TEST_JUMP };
 struct ButtonEventEntry {
     uint8_t button;
     ButtonEvent event;
+    uint8_t layer;
 };
 constexpr int EVENT_QUEUE_SIZE = 32;
 volatile ButtonEventEntry event_queue[EVENT_QUEUE_SIZE];
 volatile uint8_t event_head = 0;  // written by the interrupt
 volatile uint8_t event_tail = 0;  // written by the main loop
-void push_event(int button, ButtonEvent event) {
+void push_event(int button, ButtonEvent event, uint8_t layer = 0) {
     uint8_t next = (event_head + 1) % EVENT_QUEUE_SIZE;
     if (next == event_tail) return;  // full, drop it
     event_queue[event_head].button = static_cast<uint8_t>(button);
     event_queue[event_head].event = event;
+    event_queue[event_head].layer = layer;
     event_head = next;
 }
 
 /**
- * A: short press shows/hides the info overlay. While A is held, B, X and Y have their second function
- *    (B reset view, X next palette, Y auto zoom on/off), like a shift key.
- *    Tap and then hold A for layer 2 (visual): B relief shading, X supersampling (1x - 8x), Y color cycling.
- *    Tap twice and then hold A for layer 3 (visual 2): B color bands, X orbit trap, Y light direction.
- *    Tap three times and then hold A for layer 4 (auto zoom): B pause after a finished view, X zoom step,
- *    Y full quality (wait for supersampling as well).
+ * A: short press shows/hides the info overlay. While A is held, B, X and Y have their second function, like a
+ *    shift key. Tapping A n times and then holding it selects layer n + 1:
+ *    1 main:           B reset view, X next palette, Y auto zoom on/off
+ *    2 visual:         B color bands, X orbit trap, Y color cycling
+ *    3 light:          B relief shading, X light direction, Y set display (shrinking / preview)
+ *    4 supersampling:  B show probes, X supersampling (1x - 8x), Y supersampling right away
+ *    5 auto zoom:      B pause after a finished view, X zoom step, Y full quality (wait for supersampling as well)
+ *    6 save:           B saves the settings now, X and Y are view slots: a tap jumps there, holding stores the
+ *                      current view
  * B, X, Y: short press pans left/right or zooms in, long press pans down/up or zooms out and repeats while held.
  * Hidden: holding A + B for 2 s (after the reset view) jumps to the next deep zoom test location.
  */
@@ -737,11 +816,9 @@ bool sample_buttons(repeating_timer_t*) {
                 a_layer = tap_pending && now - tap_released_at < DOUBLE_TAP_MS ? taps + 1 : 1;
                 tap_pending = false;
             } else if (shifted) {
-                // Function layers: right away, no long press
+                // Function layers: right away, no long press. Except the slots: tap or hold.
                 a_used = true;
-                static constexpr ButtonEvent LAYER_EVENTS[] = {
-                    ButtonEvent::FUNCTION, ButtonEvent::FUNCTION2, ButtonEvent::FUNCTION3, ButtonEvent::FUNCTION4};
-                push_event(i, LAYER_EVENTS[a_layer - 1]);
+                if (!(a_layer == LAYER_SAVE && i != 1)) push_event(i, ButtonEvent::FUNCTION, a_layer);
             }
         } else if (raw) {
             uint32_t held = now - b.pressed_at;
@@ -751,6 +828,9 @@ bool sample_buttons(repeating_timer_t*) {
                 if (i == 1 && a_layer == 1 && !b.long_fired && held >= TEST_JUMP_HOLD_MS) {
                     b.long_fired = true;
                     push_event(i, ButtonEvent::TEST_JUMP);
+                } else if (i != 1 && a_layer == LAYER_SAVE && !b.long_fired && held >= LONG_PRESS_MS) {
+                    b.long_fired = true;
+                    push_event(i, ButtonEvent::FUNCTION_LONG, a_layer);
                 }
                 continue;
             } else if (!b.long_fired && held >= LONG_PRESS_MS) {
@@ -764,13 +844,15 @@ bool sample_buttons(repeating_timer_t*) {
         } else if (b.down) {
             b.down = false;
             if (i == 0) {
-                if (a_layer < 4 && !a_used && now - b.pressed_at < LONG_PRESS_MS) {
+                if (a_layer < LAYERS && !a_used && now - b.pressed_at < LONG_PRESS_MS) {
                     tap_pending = true;
                     taps = a_layer;
                     tap_released_at = now;
                 }
             } else if (!b.long_fired && !b.shifted) {
                 push_event(i, ButtonEvent::PRESS);
+            } else if (!b.long_fired && b.shifted && a_layer == LAYER_SAVE && i != 1) {
+                push_event(i, ButtonEvent::FUNCTION, a_layer);  // slot tap
             }
         }
     }
@@ -791,6 +873,7 @@ void handle_input() {
     while (event_tail != event_head) {
         int button = event_queue[event_tail].button;
         ButtonEvent event = event_queue[event_tail].event;
+        int layer = event_queue[event_tail].layer;
         event_tail = (event_tail + 1) % EVENT_QUEUE_SIZE;
         initialize_rand();
         last_input_ms = now_ms();
@@ -800,16 +883,8 @@ void handle_input() {
                 button_pressed(button);
                 break;
             case ButtonEvent::FUNCTION:
-                function_pressed(button);
-                break;
-            case ButtonEvent::FUNCTION2:
-                function2_pressed(button);
-                break;
-            case ButtonEvent::FUNCTION3:
-                function3_pressed(button);
-                break;
-            case ButtonEvent::FUNCTION4:
-                function4_pressed(button);
+            case ButtonEvent::FUNCTION_LONG:
+                layer_pressed(layer, button, event == ButtonEvent::FUNCTION_LONG);
                 break;
             case ButtonEvent::LONG:
             case ButtonEvent::REPEAT:
@@ -851,6 +926,10 @@ Settings current_settings() {
     s.auto_zoom_speed = static_cast<uint8_t>(autoZoom.speed_index());
     s.auto_zoom_pause = static_cast<uint8_t>(autoZoom.pause_index());
     s.auto_zoom_full_quality = state.auto_zoom_full_quality;
+    s.show_probes = fractalis.show_probes();
+    s.supersample_right_away = fractalis.supersample_right_away();
+    s.set_display_preview = !fractalis.undecided_in_set();
+    memcpy(s.slots, slots, sizeof(slots));
     return s;
 }
 
@@ -873,6 +952,10 @@ void apply_settings(const Settings& s) {
     autoZoom.set_speed(s.auto_zoom_speed);
     autoZoom.set_pause(s.auto_zoom_pause);
     state.auto_zoom_full_quality = s.auto_zoom_full_quality;
+    fractalis.set_show_probes(s.show_probes);
+    if (s.supersample_right_away) fractalis.set_supersample_right_away(true);
+    fractalis.set_undecided_in_set(!s.set_display_preview);
+    memcpy(slots, s.slots, sizeof(slots));
     // A running auto zoom continues where it was
     state.auto_zoom = s.auto_zoom && view_valid;
     if (state.auto_zoom)

@@ -2,6 +2,7 @@
 #define FRACTALIS_H
 
 #include "FractalisState.h"
+#include "globals.h"
 #include "sync.h"
 
 /**
@@ -58,11 +59,34 @@ public:
     void set_orbit_trap(int trap);
     int orbit_trap() const { return trap_mode; }
 
+    /**
+     * Supersampling right away: every pixel gets all of its sub-samples in every pass, the probes as well. No
+     * separate supersampling pass at the end: slower until the first image, but it doesn't change its look when it's
+     * done. Changing it recalculates the view.
+     */
+    void set_supersample_right_away(bool on);
+    bool supersample_right_away() const { return ss_right_away; }
+    // The probes are drawn as soon as they are calculated. Otherwise they only measure the iteration limit, and the
+    // passes draw their pixels like all others.
+    void set_show_probes(bool on) { show_probes_ = on; }
+    bool show_probes() const { return show_probes_; }
+    /**
+     * Pixels that haven't escaped at the limit of the current pass are shown as part of the set (black): the set
+     * starts out too big and shrinks with every pass. Otherwise they keep their preview color until the last pass.
+     */
+    void set_undecided_in_set(bool on) { undecided_in_set_ = on; }
+    bool undecided_in_set() const { return undecided_in_set_; }
+
     // The view and pixel state must not be modified by others while the lock is held
     Lock& get_lock() { return lock; }
 
-    // Iteration limit for a full calculation pass at the given zoom
+    // Microseconds since some point, for the statistics printed when a view is done. nullptr: no statistics.
+    static uint64_t (*clock_us)();
+
+    // Iteration limit for a full calculation pass at the given zoom, estimated without looking at the view
     int max_iterations(double zoom) const;
+    // Iteration limit the current view aims for, measured with the probe points
+    int target_iterations() const { return pass_target; }
 
 private:
     struct View {
@@ -127,7 +151,23 @@ private:
     uint32_t pass_id;
     int pass_limit;
     int pass_target;    // iteration limit to reach with the current view
+    int view_target;    // the target measured with the probes, refining goes up to REFINE_MAX_FACTOR times that
+    int last_view_limit = 0;  // highest limit of the last finished view, the probes of the next one go to twice that
+
+    // Where the time of a view goes, printed when it is done
+    struct Stats {
+        uint64_t view_start, pass_start;
+        int pass_pixels;
+        int ref_orbits, ref_iterations;
+        uint64_t ref_us, search_us;
+        char passes[200];  // "limit:ms/pixels " per pass
+        int passes_length;
+    } stats;
+    uint64_t now_us() const { return clock_us ? clock_us() : 0; }
+    void log_pass(const char* name);
+    void print_stats();
     int pass_resolved;  // pixels that escaped in the current pass
+    int pass_ran_out;   // pixels that reached the limit of the current pass without being proven to be in the set
     View pass_view;
     int next_index;
     int in_flight;
@@ -141,12 +181,43 @@ private:
     int first_limit_hint;
     int estimate_first_limit() const;
 
+    /**
+     * Probe points: every view starts with a pass over a few hundred pixels at the highest limit (MAX_ITER), dense
+     * at the center and sparse further out. Their escape iterations set the target limit of the view. They are
+     * normal pixels of the image.
+     */
+    static constexpr int MAX_PROBES = 400;
+    PixelPosition probes[MAX_PROBES];  // offsets from the screen center
+    int probe_count;
+    bool probe_pass = false;
+    // The probes that escaped. Weight: the area a probe stands for (the square of the grid spacing there), so the
+    // dense probes at the center don't dominate.
+    struct ProbeResult {
+        uint16_t iterations;
+        uint16_t weight;
+    };
+    ProbeResult probe_results[MAX_PROBES];
+    int probe_escaped;
+    // Iterations by which this share of the escaping probes (by area) escaped
+    int probe_percentile(float share) const;
+    int probe_ran_out;
+    void begin_view_passes();
+
+    // Optional extra output of calculate_pixel()
+    struct PixelInfo {
+        int iterations;  // until it escaped
+        bool ran_out;    // in the set at this limit, but not proven to be in the set
+    };
+
     void start_pass();
     void begin_pass(int limit, int target);
     int next_pass_limit(int limit, int target) const;
     void finish_pass();
     bool claim_pixel(int& x, int& y);
-    void store_result(int x, int y, const PixelState& result);
+    // The order the pixels of a pass are handed out in: coarse to fine grids, from the center outwards
+    int order_p = 0, order_step = 0, order_k = 0;
+    bool next_in_order(int& x, int& y);
+    void store_result(int x, int y, const PixelState& result, const PixelInfo& info);
     void request_calculation();
 
     bool reference_ready() const;
@@ -158,6 +229,11 @@ private:
     bool extend_reference(uint32_t id, int target_length, bool (*interrupt)());
 
     int trap_mode = TRAP_OFF;
+    bool ss_right_away = false;
+    bool show_probes_ = false;
+    bool undecided_in_set_ = UNDECIDED_IN_SET;
+    // The current pass supersamples every pixel right away
+    bool right_away_pass() const { return ss_right_away && ss_samples > 1 && !ss_pass; }
     // Supersampling, see set_supersampling()
     int ss_samples = 1;
     bool ss_pass = false;  // the current pass adds sub-samples
@@ -167,7 +243,7 @@ private:
 
     // Returns false, if the calculation was aborted. sub_x/sub_y: sample position in the pixel, 0 = center.
     bool calculate_pixel(int x, int y, const View& view, int iter_limit, uint32_t id, bool (*interrupt)(),
-                         PixelState& pixel, float sub_x = 0.0f, float sub_y = 0.0f) const;
+                         PixelState& pixel, float sub_x = 0.0f, float sub_y = 0.0f, PixelInfo* info = nullptr) const;
     // Adds the sub-samples to a calculated pixel
     bool supersample_pixel(int x, int y, const View& view, int iter_limit, uint32_t id, bool (*interrupt)(),
                            PixelState& pixel) const;

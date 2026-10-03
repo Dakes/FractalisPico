@@ -18,6 +18,7 @@ namespace palette {
 constexpr int POSITION_BITS = 20;
 constexpr int LUT_BITS = 10;
 constexpr int LUT_SIZE = 1 << LUT_BITS;
+constexpr int MAX_WIDTH = 320;  // of the screen
 
 uint32_t position(float smooth_iteration);
 // Orbit traps: palette position from the smallest squared distance of the orbit to the trap (log scale)
@@ -79,8 +80,9 @@ public:
      */
     void render(PixelState* const* pixels, int width, int height, uint16_t* frame_buffer) const;
     // Only the rows first_row .. first_row + rows - 1, into a buffer of that many rows
+    // content: see FractalisState::content, pixels outside of it that aren't calculated yet show its edge
     void render_rows(PixelState* const* pixels, int width, int height, int first_row, int rows,
-                     uint16_t* out_rows) const;
+                     uint16_t* out_rows, const ScreenRect* content = nullptr) const;
 
 private:
     int current;
