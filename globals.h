@@ -2,8 +2,9 @@
 #define GLOBALS_H
 
 #define DEBUG true
-// System clock. The RP2350 is specified for 150 MHz, but runs fine a good bit faster. 0 = don't change
-#define SYS_CLOCK_KHZ 200000
+// System clock. The RP2350 is specified for 150 MHz, but runs fine a good bit faster. 0 = don't change.
+// Above 200 MHz the core voltage goes up to 1.15 V and the flash gets a bigger clock divider.
+#define SYS_CLOCK_KHZ 250000
 
 #define UPDATE_SLEEP 16
 #define FRAME_INTERVAL_MS 100    // Time between display refreshes while calculating

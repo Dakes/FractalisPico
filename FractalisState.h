@@ -66,6 +66,18 @@ struct PixelState {
 
     void setEscaped(uint32_t position) { flags = COMPLETE | VALID; fine = 0; setPosition(position); }
     void setInSet() { color = 0; fine = 0; flags = COMPLETE | VALID | IN_SET; }
+
+    /**
+     * Black pixels don't need a position, their fine byte marks why they are black: proven to be in the set (not
+     * calculated again), or undecided at the last limit with its z stored in slot `color` (continues there).
+     */
+    static constexpr uint8_t PROVEN = 1, RESUMABLE = 2;
+    bool isBlack() const { return (flags & KIND_MASK) == (VALID | IN_SET); }
+    bool isProven() const { return isBlack() && fine == PROVEN; }
+    bool isResumable() const { return isBlack() && fine == RESUMABLE; }
+    void setInSetProven() { setInSet(); fine = PROVEN; }
+    void setInSetResumable(uint16_t slot) { setInSet(); color = slot; fine = RESUMABLE; }
+    void clearMark() { if (isBlack()) { color = 0; fine = 0; } }
     // In the set at the current limit, the preview color stays until the final pass
     void setInSetKeepingPreview() { flags = COMPLETE | IN_SET; }
     void dropPreviewColor() { if (isInSetColored()) flags |= VALID; }

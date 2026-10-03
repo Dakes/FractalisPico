@@ -5,6 +5,8 @@
 #include "pico/stdio.h"
 #include "hardware/clocks.h"
 #include "hardware/spi.h"
+#include "hardware/vreg.h"
+#include "hardware/structs/qmi.h"
 #include "pico_display.hpp"
 #include "drivers/st7789/st7789.hpp"
 #include "libraries/pico_graphics/pico_graphics.hpp"
@@ -133,12 +135,50 @@ bool overlay_wanted() {
     return hud_enabled || function_mode != 0;
 }
 
-void set_clock() {
-    if (SYS_CLOCK_KHZ == 0 || !set_sys_clock_khz(SYS_CLOCK_KHZ, false))
+/**
+ * Above 200 MHz the flash gets a bigger clock divider (at most 100 MHz flash clock, like at 200 MHz / 2) and read
+ * delay. Runs from RAM: the flash is read with the new timing right after.
+ */
+void __not_in_flash_func(set_flash_timing)(uint32_t sys_khz, uint32_t boot_timing) {
+    if (sys_khz <= 200000) {
+        qmi_hw->m[0].timing = boot_timing;
         return;
+    }
+    uint32_t divider = (sys_khz + 99999) / 100000;
+    uint32_t timing = boot_timing & ~(QMI_M0_TIMING_CLKDIV_BITS | QMI_M0_TIMING_RXDELAY_BITS);
+    qmi_hw->m[0].timing = timing | (divider << QMI_M0_TIMING_CLKDIV_LSB) | (divider << QMI_M0_TIMING_RXDELAY_LSB);
+}
+
+/**
+ * Above 200 MHz with a slightly higher core voltage (1.15 V instead of 1.10 V, the limit without unlocking is
+ * 1.30 V) and a slower flash. The new flash timing comes first, it works with the boot clock as well.
+ */
+void set_clock() {
+    if (SYS_CLOCK_KHZ == 0)
+        return;
+    if (SYS_CLOCK_KHZ > 200000) {
+        vreg_set_voltage(VREG_VOLTAGE_1_15);
+        busy_wait_ms(2);
+    }
+    const uint32_t boot_timing = qmi_hw->m[0].timing;
+    uint32_t interrupts = save_and_disable_interrupts();
+    set_flash_timing(SYS_CLOCK_KHZ, boot_timing);
+    if (!set_sys_clock_khz(SYS_CLOCK_KHZ, false))
+        set_flash_timing(clock_get_hz(clk_sys) / 1000, boot_timing);
+    restore_interrupts(interrupts);
     // The peripheral clock follows the system clock, the display SPI needs its baud rate again.
     // The ST7789 requires 16 ns between SPI rising edges = 62.5 MHz
     spi_set_baudrate(get_spi_pins(BG_SPI_FRONT).spi, 62'500'000);
+}
+
+// Each core counts its cycles (DWT), for the cycles per iteration in the statistics
+void enable_cycle_counter() {
+    *reinterpret_cast<volatile uint32_t*>(0xE000EDFC) |= 1u << 24;  // DEMCR.TRCENA
+    *reinterpret_cast<volatile uint32_t*>(0xE0001000) |= 1u;        // DWT_CTRL.CYCCNTENA
+}
+
+uint32_t read_cycle_counter() {
+    return *reinterpret_cast<volatile uint32_t*>(0xE0001004);  // DWT_CYCCNT
 }
 
 int main() {
@@ -157,7 +197,11 @@ int main() {
             sleep_ms(10);
         }
     }
-    printf("Starting FractalisPico at %lu kHz\n", static_cast<unsigned long>(clock_get_hz(clk_sys) / 1000));
+    printf("Starting FractalisPico at %lu kHz, display SPI at %lu kHz, flash clock divider %lu, read delay %lu\n",
+           static_cast<unsigned long>(clock_get_hz(clk_sys) / 1000),
+           static_cast<unsigned long>(spi_get_baudrate(get_spi_pins(BG_SPI_FRONT).spi) / 1000),
+           static_cast<unsigned long>((qmi_hw->m[0].timing & QMI_M0_TIMING_CLKDIV_BITS) >> QMI_M0_TIMING_CLKDIV_LSB),
+           static_cast<unsigned long>((qmi_hw->m[0].timing & QMI_M0_TIMING_RXDELAY_BITS) >> QMI_M0_TIMING_RXDELAY_LSB));
 
     led.set_brightness(20);
     printf("Display initialized\n");
@@ -166,7 +210,12 @@ int main() {
     bool defaults = button_b.raw();
     Settings& saved = saved_settings;
     bool loaded = settings::load(saved);
-    if (DEBUG) Fractalis::clock_us = time_us_64;  // statistics per view
+    if (DEBUG) {
+        // statistics per view
+        Fractalis::clock_us = time_us_64;
+        enable_cycle_counter();
+        Fractalis::cycle_counter = read_cycle_counter;
+    }
     fractalis.reset_view();
     if (defaults) {
         printf("B held: starting with the default settings\n");
@@ -188,6 +237,7 @@ int main() {
 
     printf("Entering main loop on core0\n");
     uint32_t last_frame_ms = 0;
+    uint32_t last_frame_duration_ms = 0;
     uint32_t seen_passes = 0;
     bool animating = false;
     float color_phase = 0.0f;
@@ -248,18 +298,22 @@ int main() {
             state.needs_redraw = true;
         }
 
-        // Redraw right away after input, regularly while calculating or animating
+        // Redraw right away after input, regularly while calculating or animating. While calculating, at most half
+        // of core0's time goes to drawing (a frame can take longer than the interval).
         uint32_t since_frame = now - last_frame_ms;
-        if (state.needs_redraw
-                || (animating && since_frame >= (calculating ? ANIMATION_INTERVAL_CALCULATING_MS : ANIMATION_INTERVAL_MS))
-                || (calculating && since_frame >= FRAME_INTERVAL_MS)) {
+        uint32_t interval = animating ? (calculating ? ANIMATION_INTERVAL_CALCULATING_MS : ANIMATION_INTERVAL_MS)
+                                      : FRAME_INTERVAL_MS;
+        if (calculating) interval = std::max(interval, 2 * last_frame_duration_ms);
+        if (state.needs_redraw || ((animating || calculating) && since_frame >= interval)) {
             last_frame_ms = now;
             animating = color_palette.animate();
             uint64_t drawing_started = time_us_64();
             update_display();
+            uint64_t drawing_us = time_us_64() - drawing_started;
+            last_frame_duration_ms = static_cast<uint32_t>(drawing_us / 1000);
             if (calculating) {
                 view_frames++;
-                view_drawing_us += time_us_64() - drawing_started;
+                view_drawing_us += drawing_us;
             }
         }
 
@@ -298,6 +352,7 @@ int main() {
 
 void core1_entry() {
     printf("Core1 started\n");
+    if (DEBUG) enable_cycle_counter();
     // Core0 can then park this core while it writes the settings to the flash
     flash_safe_execute_core_init();
     while(true) {
@@ -353,10 +408,25 @@ void draw_strip(uint16_t* strip, int first_row, int rows) {
             continue;
         // White text with a dark shadow, so it is readable on bright colors as well
         display.set_font(t.font);
-        display.set_pen(0, 0, 0);
-        display.text(t.text, Point(t.position.x + 1, t.position.y + 1), display.bounds.w, t.scale);
-        display.set_pen(255, 255, 255);
-        display.text(t.text, t.position, display.bounds.w, t.scale);
+        // Only the lines in this strip: drawing a text goes through all of its pixels, also the clipped ones
+        const int line_height = t.font->height * t.scale;
+        int line_y = t.position.y;
+        for (const char* line = t.text; *line;) {
+            const char* end = strchr(line, '\n');
+            size_t length = end ? static_cast<size_t>(end - line) : strlen(line);
+            if (line_y < first_row + rows && line_y + line_height + 1 > first_row) {
+                char buffer[sizeof(OverlayText::text)];
+                memcpy(buffer, line, length);
+                buffer[length] = '\0';
+                display.set_pen(0, 0, 0);
+                display.text(buffer, Point(t.position.x + 1, line_y + 1), display.bounds.w, t.scale);
+                display.set_pen(255, 255, 255);
+                display.text(buffer, Point(t.position.x, line_y), display.bounds.w, t.scale);
+            }
+            line_y += line_height;
+            if (!end) break;
+            line = end + 1;
+        }
     }
 }
 

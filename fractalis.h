@@ -82,6 +82,8 @@ public:
 
     // Microseconds since some point, for the statistics printed when a view is done. nullptr: no statistics.
     static uint64_t (*clock_us)();
+    // Core cycles since some point (DWT), to measure the cycles per iteration. nullptr: not measured.
+    static uint32_t (*cycle_counter)();
 
     // Iteration limit for a full calculation pass at the given zoom, estimated without looking at the view
     int max_iterations(double zoom) const;
@@ -111,6 +113,9 @@ private:
         // Everything this close to the reference is in the set (0 = unknown)
         double interior_radius_sq = 0;
         int trap = TRAP_OFF;
+        // Series approximation: dz at iteration series_skip = sum series[k] dc^(k+1), the pixels start there
+        int series_skip = 0;
+        double series_r[4] = {}, series_i[4] = {};
     };
 
     /**
@@ -153,6 +158,13 @@ private:
     int pass_target;    // iteration limit to reach with the current view
     int view_target;    // the target measured with the probes, refining goes up to REFINE_MAX_FACTOR times that
     int last_view_limit = 0;  // highest limit of the last finished view, the probes of the next one go to twice that
+    // Undecided pixels of the float calculation store z in the (then unused) orbit buffer, the next pass continues
+    // there
+    int resume_limit = 0;     // limit of the pass before, where the stored z are from
+    int resume_slots = 0;     // used slots
+    // Series approximation of the current view, valid for this reference generation
+    uint32_t series_generation = 0;
+    void compute_series();
 
     // Where the time of a view goes, printed when it is done
     struct Stats {
@@ -162,6 +174,8 @@ private:
         uint64_t ref_us, search_us;
         char passes[200];  // "limit:ms/pixels " per pass
         int passes_length;
+        uint64_t cycles, iterations;  // in the pixel calculations, all cores
+        uint32_t pixels;
     } stats;
     uint64_t now_us() const { return clock_us ? clock_us() : 0; }
     void log_pass(const char* name);
@@ -205,8 +219,13 @@ private:
 
     // Optional extra output of calculate_pixel()
     struct PixelInfo {
-        int iterations;  // until it escaped
+        int iterations;  // until it escaped (or the limit)
+        int work;        // iterations actually done (without the skipped and continued ones)
         bool ran_out;    // in the set at this limit, but not proven to be in the set
+        // In: continue from z at iteration n. Out: ran out with z, it can continue from there.
+        bool has_state;
+        float zr, zi;
+        int n;
     };
 
     void start_pass();

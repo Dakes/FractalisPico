@@ -96,6 +96,7 @@ target_link_libraries(${NAME}
     pico_multicore
     pico_flash
     hardware_flash
+    hardware_vreg
     bitmap_fonts
     hershey_fonts
     rgbled

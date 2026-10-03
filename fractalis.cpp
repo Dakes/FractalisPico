@@ -10,7 +10,7 @@
 namespace {
 
 struct Escape {
-    int iterations;
+    int iterations;         // done: the escape iteration, or as many as it took to find out that it is in the set
     float magnitude_sq;  // |z|^2 after escaping
     bool in_set;
     bool aborted;
@@ -69,6 +69,26 @@ Escape with_trap(int trap, const F& f) {
 // Long calculations check regularly, if their result is still needed
 constexpr int ABORT_CHECK_MASK = 511;
 
+struct AbortCheck {
+    const volatile uint32_t* calculation_id;
+    uint32_t id;
+    bool (*interrupt)();
+    bool operator()() const { return *calculation_id != id || (interrupt && interrupt()); }
+};
+
+// Inlined into the function that uses it, see iterate_perturbed_scaled_in_ram() below
+#define KERNEL __attribute__((always_inline)) inline
+
+/**
+ * The loops of the normal case (no orbit trap) run from RAM. From flash, they share the XIP cache with the code
+ * core0 draws with: 8 to 16 % slower.
+ */
+#if PICO_ON_DEVICE
+#define IN_RAM __attribute__((noinline, section(".time_critical.fractalis")))
+#else
+#define IN_RAM __attribute__((noinline))
+#endif
+
 template <typename T>
 bool is_in_main_bulb(T x, T y) {
     // Check for main cardioid
@@ -118,7 +138,7 @@ Escape iterate(T cr, T ci, int iter_limit, T epsilon, bool check_periodicity, fl
         }
         if (check_periodicity) {
             if (std::abs(zr - saved_r) + std::abs(zi - saved_i) < epsilon) {
-                return {iter_limit, 0.0f, true, false, trap, true};
+                return {n + 1, 0.0f, true, false, trap, true};
             }
             if (n == save_at) {
                 saved_r = zr;
@@ -424,7 +444,7 @@ Escape iterate_perturbed(const float* orbit, int orbit_length, T dcr, T dci, int
         float ref_r = orbit[2 * m], ref_i = orbit[2 * m + 1];
         if (ref_r == saved_zr && ref_i == saved_zi && std::abs(dzr - saved_dzr) + std::abs(dzi - saved_dzi) < epsilon
                 && std::abs(dzr) + std::abs(dzi) < max_compared_dz) {
-            return {iter_limit, 0.0f, true, false, trap, true};
+            return {n + 1, 0.0f, true, false, trap, true};
         }
         if (n == save_at) {
             saved_zr = ref_r;
@@ -446,7 +466,7 @@ Escape iterate_perturbed(const float* orbit, int orbit_length, T dcr, T dci, int
  * renormalization (a few times per pixel) uses double.
  */
 template <int TRAP, typename Abort>
-Escape iterate_perturbed_scaled(const float* orbit, int orbit_length, double dcr, double dci, int iter_limit,
+KERNEL Escape iterate_perturbed_scaled(const float* orbit, int orbit_length, double dcr, double dci, int iter_limit,
                                 double pixel_size, const Abort& abort) {
     constexpr int SHIFT = 16;
     constexpr float UP = 0x1p16f, DOWN = 0x1p-16f;
@@ -546,7 +566,7 @@ Escape iterate_perturbed_scaled(const float* orbit, int orbit_length, double dcr
         float ref_r = orbit[2 * m], ref_i = orbit[2 * m + 1];
         if (ref_r == saved_zr && ref_i == saved_zi && e == saved_e
                 && std::abs(wr - saved_wr) + std::abs(wi - saved_wi) < epsilon && size < max_compared) {
-            return {iter_limit, 0.0f, true, false, trap, true};
+            return {n + 1, 0.0f, true, false, trap, true};
         }
         if (n == save_at) {
             saved_zr = ref_r;
@@ -558,6 +578,136 @@ Escape iterate_perturbed_scaled(const float* orbit, int orbit_length, double dcr
         }
     }
     return {iter_limit, 0.0f, true, false, trap};
+}
+
+IN_RAM Escape iterate_perturbed_scaled_in_ram(const float* orbit, int orbit_length, double dcr, double dci,
+                                              int iter_limit, double pixel_size, const AbortCheck& abort) {
+    return iterate_perturbed_scaled<Fractalis::TRAP_OFF>(orbit, orbit_length, dcr, dci, iter_limit, pixel_size, abort);
+}
+
+constexpr float BAILOUT_F = static_cast<float>(BAILOUT_SQ);
+
+/**
+ * Perturbation loop v2: Z stays in registers and is walked with a pointer, the abort check, the periodicity save
+ * point and the limit are folded into one bound of the inner loop. Same results as iterate_perturbed.
+ */
+IN_RAM Escape iterate_perturbed_v2(const float* orbit, int orbit_length, float dcr, float dci, int iter_limit,
+                                   float epsilon, const AbortCheck& abort, int start, float dzr, float dzi) {
+    const float* z = orbit + 2 * start;
+    const float* const last = orbit + 2 * (orbit_length - 1);
+    float big_zr = z[0], big_zi = z[1];
+    float saved_zr = NAN, saved_zi = NAN, saved_dzr = 0, saved_dzi = 0;
+    int save_at = start + 8;
+    const float max_compared = epsilon * 1e6f;
+    int n = start;
+    while (n < iter_limit) {
+        const int stop = std::min(std::min(iter_limit, (n | ABORT_CHECK_MASK) + 1), save_at + 1);
+        for (; n < stop; ++n) {
+            const float ar = big_zr + big_zr + dzr;
+            const float ai = big_zi + big_zi + dzi;
+            const float nr = ar * dzr - ai * dzi + dcr;
+            dzi = ar * dzi + ai * dzr + dci;
+            dzr = nr;
+            z += 2;
+            big_zr = z[0];
+            big_zi = z[1];
+            const float zr = big_zr + dzr, zi = big_zi + dzi;
+            const float magnitude_sq = zr * zr + zi * zi;
+            if (magnitude_sq > BAILOUT_F) return {n + 1, magnitude_sq, false, false};
+            if (magnitude_sq < dzr * dzr + dzi * dzi || z == last) {
+                dzr = zr;
+                dzi = zi;
+                z = orbit;
+                big_zr = orbit[0];
+                big_zi = orbit[1];
+            }
+            if (big_zr == saved_zr && big_zi == saved_zi
+                    && std::abs(dzr - saved_dzr) + std::abs(dzi - saved_dzi) < epsilon
+                    && std::abs(dzr) + std::abs(dzi) < max_compared) {
+                return {n + 1, 0.0f, true, false, INFINITY, true};
+            }
+        }
+        if (n >= iter_limit) break;
+        if ((n & ABORT_CHECK_MASK) == 0 && abort()) return {n, 0.0f, false, true};
+        if (n == save_at + 1) {
+            saved_zr = big_zr;
+            saved_zi = big_zi;
+            saved_dzr = dzr;
+            saved_dzi = dzi;
+            save_at = start + 2 * (save_at - start);
+        }
+    }
+    return {iter_limit, 0.0f, true, false};
+}
+
+// Where a float pixel continues (the next pass resumes undecided pixels) and what it ends with
+struct FloatState {
+    float zr, zi;
+    int n;
+};
+
+/**
+ * Plain float loop v2: two iterations per escape check (with |z|^2 <= 2^20 two more squarings stay finite, the last
+ * two steps are redone for the exact count), the periodicity check every second iteration. Starts and limits can be
+ * odd: the pairs never pass the limit, a single step does the last iteration.
+ */
+IN_RAM Escape iterate_v2(float cr, float ci, int iter_limit, float epsilon, const AbortCheck& abort,
+                         FloatState& from) {
+    float zr = from.zr, zi = from.zi, zr2 = zr * zr, zi2 = zi * zi;
+    float saved_r = zr, saved_i = zi;
+    const int start = from.n;
+    int save_at = start + 8;
+    int check_at = (start | ABORT_CHECK_MASK) + 1;
+    int n = start;
+    while (n + 2 <= iter_limit) {
+        // Pairs up to the next save point or abort check (at least one), without passing the limit
+        const int stop = std::min(iter_limit, std::max(n + 2, std::min(save_at, check_at)));
+        for (; n + 2 <= stop; n += 2) {
+            const float pr = zr, pi = zi;
+            zi = (zr + zr) * zi + ci;
+            zr = zr2 - zi2 + cr;
+            zr2 = zr * zr;
+            zi2 = zi * zi;
+            zi = (zr + zr) * zi + ci;
+            zr = zr2 - zi2 + cr;
+            zr2 = zr * zr;
+            zi2 = zi * zi;
+            if (zr2 + zi2 > BAILOUT_F) {
+                // Again one by one from before the two steps, for the exact count
+                zr = pr;
+                zi = pi;
+                for (int k = 0; k < 2; ++k) {
+                    float t = zr * zr - zi * zi + cr;
+                    zi = (zr + zr) * zi + ci;
+                    zr = t;
+                    float magnitude_sq = zr * zr + zi * zi;
+                    if (magnitude_sq > BAILOUT_F) return {n + k + 1, magnitude_sq, false, false};
+                }
+            }
+            if (std::abs(zr - saved_r) + std::abs(zi - saved_i) < epsilon) {
+                return {n + 2, 0.0f, true, false, INFINITY, true};
+            }
+        }
+        if (n >= check_at) {
+            if (abort()) return {n, 0.0f, false, true};
+            check_at += ABORT_CHECK_MASK + 1;
+        }
+        if (n >= save_at) {
+            saved_r = zr;
+            saved_i = zi;
+            save_at = start + 2 * (save_at - start);
+        }
+    }
+    if (n < iter_limit) {
+        // An odd number of iterations: the last one alone
+        float t = zr * zr - zi * zi + cr;
+        zi = (zr + zr) * zi + ci;
+        zr = t;
+        float magnitude_sq = zr * zr + zi * zi;
+        if (magnitude_sq > BAILOUT_F) return {n + 1, magnitude_sq, false, false};
+    }
+    from = {zr, zi, iter_limit};
+    return {iter_limit, 0.0f, true, false};
 }
 
 }  // namespace
@@ -596,6 +746,7 @@ Fractalis::~Fractalis() {
 }
 
 uint64_t (*Fractalis::clock_us)() = nullptr;
+uint32_t (*Fractalis::cycle_counter)() = nullptr;
 
 void Fractalis::log_pass(const char* name) {
     if (!clock_us) return;
@@ -608,10 +759,13 @@ void Fractalis::log_pass(const char* name) {
 
 void Fractalis::print_stats() {
     if (!clock_us) return;
-    printf("Stats: %lu ms | %s| reference: %d orbits, %d iterations, %lu ms, search %lu ms\n",
+    printf("Stats: %lu ms | %s| reference: %d orbits, %d iterations, %lu ms, search %lu ms | pixels: %lu, %.1f M "
+           "iterations, %lu cycles per iteration\n",
            static_cast<unsigned long>((now_us() - stats.view_start) / 1000), stats.passes, stats.ref_orbits,
            stats.ref_iterations, static_cast<unsigned long>(stats.ref_us / 1000),
-           static_cast<unsigned long>(stats.search_us / 1000));
+           static_cast<unsigned long>(stats.search_us / 1000), static_cast<unsigned long>(stats.pixels),
+           stats.iterations / 1e6,
+           static_cast<unsigned long>(stats.iterations ? stats.cycles / stats.iterations : 0));
 }
 
 int Fractalis::max_iterations(double zoom) const {
@@ -622,14 +776,15 @@ int Fractalis::max_iterations(double zoom) const {
 
 bool Fractalis::calculate_pixel(int x, int y, const View& view, int iter_limit, uint32_t id, bool (*interrupt)(),
                                 PixelState& pixel, float sub_x, float sub_y, PixelInfo* info) const {
-    auto abort = [this, id, interrupt]() {
-        return state->calculation_id != id || (interrupt && interrupt());
-    };
+    const AbortCheck abort{&state->calculation_id, id, interrupt};
     // The interior checks know that a pixel is in the set without iterating. An orbit trap needs the orbit though,
     // a short one is enough: it is caught in its cycle quickly.
     const bool trapped = view.trap != TRAP_OFF;
     const int interior_limit = std::min(iter_limit, TRAP_INTERIOR_ITER);
     Escape escape;
+    int skipped = 0;  // iterations not done here: continued or skipped by the series approximation
+    const bool resume = info && info->has_state;
+    if (info) info->has_state = false;
 
     if (view.zoom < FLOAT_MAX_ZOOM) {
         // Everything in single precision, double math is slower and would cost more than the iterations
@@ -637,7 +792,19 @@ bool Fractalis::calculate_pixel(int x, int y, const View& view, int iter_limit, 
         float ci = view.center_if + ((y + 0.5f + sub_y - state->screen_h / 2.0f) * view.step_f + view.center_if_low);
         bool interior = is_in_main_bulb(cr, ci);
         if (interior && !trapped) {
-            escape = {iter_limit, 0.0f, true, false, INFINITY, true};
+            escape = {0, 0.0f, true, false, INFINITY, true};
+        } else if (!trapped) {
+            const float epsilon = view.step_f * 1e-3f;
+            FloatState from = {0.0f, 0.0f, 0};
+            if (resume) from = {info->zr, info->zi, info->n};
+            skipped = from.n;
+            escape = iterate_v2(cr, ci, iter_limit, epsilon, abort, from);
+            if (info && escape.in_set && !escape.proven && !escape.aborted) {
+                // ran out: where it can continue
+                info->has_state = true;
+                info->zr = from.zr;
+                info->zi = from.zi;
+            }
         } else {
             escape = with_trap(view.trap, [&](auto trap) {
                 return iterate<decltype(trap)::value>(cr, ci, interior ? interior_limit : iter_limit,
@@ -667,7 +834,38 @@ bool Fractalis::calculate_pixel(int x, int y, const View& view, int iter_limit, 
         int limit = interior ? interior_limit : iter_limit;
 
         if (interior && !trapped) {
-            escape = {iter_limit, 0.0f, true, false, INFINITY, true};
+            escape = {0, 0.0f, true, false, INFINITY, true};
+        } else if (view.perturbed && !trapped) {
+            double dcr = view.ref_offset_r + offset_r;
+            double dci = view.ref_offset_i + offset_i;
+#ifdef DOUBLE_PERTURBATION
+            escape = iterate_perturbed<TRAP_OFF>(view.orbit, view.orbit_length, dcr, dci, limit, view.step * 1e-3,
+                                                 view.step, abort);
+#else
+            if (view.zoom >= SCALED_PERTURBATION_MIN_ZOOM) {
+                escape = iterate_perturbed_scaled_in_ram(view.orbit, view.orbit_length, dcr, dci, limit, view.step,
+                                                         abort);
+            } else {
+                // Series approximation: dz at iteration series_skip right away, sum series[k] dc^(k+1) (Horner)
+                int start = 0;
+                float start_dzr = 0, start_dzi = 0;
+                if (view.series_skip > 0) {
+                    double sr = view.series_r[3], si = view.series_i[3];
+                    for (int k = 2; k >= 0; --k) {
+                        double tr = sr * dcr - si * dci + view.series_r[k];
+                        si = sr * dci + si * dcr + view.series_i[k];
+                        sr = tr;
+                    }
+                    start_dzr = static_cast<float>(sr * dcr - si * dci);
+                    start_dzi = static_cast<float>(sr * dci + si * dcr);
+                    start = std::min(view.series_skip, limit);
+                    skipped = start;
+                }
+                escape = iterate_perturbed_v2(view.orbit, view.orbit_length, static_cast<float>(dcr),
+                                              static_cast<float>(dci), limit, static_cast<float>(view.step * 1e-3),
+                                              abort, start, start_dzr, start_dzi);
+            }
+#endif
         } else if (view.perturbed) {
             double dcr = view.ref_offset_r + offset_r;
             double dci = view.ref_offset_i + offset_i;
@@ -706,6 +904,7 @@ bool Fractalis::calculate_pixel(int x, int y, const View& view, int iter_limit, 
     }
     if (info) {
         info->iterations = escape.iterations;
+        info->work = std::max(0, escape.iterations - skipped);
         info->ran_out = escape.in_set && !escape.proven;
     }
 
@@ -902,6 +1101,12 @@ void Fractalis::start_pass() {
 
     stats = {};
     stats.view_start = now_us();
+    // Marks and stored z belong to the last view
+    for (int y = 0; y < state->screen_h; ++y) {
+        for (int x = 0; x < state->screen_w; ++x) state->pixelState[y][x].clearMark();
+    }
+    resume_slots = 0;
+    resume_limit = 0;
 
     // First the probe points, they set the target of the view (begin_view_passes). Right after a pan or zoom twice
     // the limit of the view before is enough, otherwise the highest limit.
@@ -918,6 +1123,84 @@ void Fractalis::start_pass() {
     if (pass_view.perturbed && !keep_reference && ref.tries == 0) {
         choose_reference();
     }
+}
+
+namespace {
+struct Complex {
+    double r, i;
+    Complex operator+(const Complex& b) const { return {r + b.r, i + b.i}; }
+    Complex operator-(const Complex& b) const { return {r - b.r, i - b.i}; }
+    Complex operator*(const Complex& b) const { return {r * b.r - i * b.i, r * b.i + i * b.r}; }
+    double norm() const { return r * r + i * i; }
+};
+}  // namespace
+
+/**
+ * Series approximation: near the reference, dz_n = A_n dc + B_n dc^2 + C_n dc^3 + D_n dc^4 with coefficients that only
+ * depend on the reference orbit:  S'_k = 2 Z S_k + sum S_j S_(k-j) (+ 1 for k = 1). As long as the series is exact
+ * for the corners, edge centers and the center of the screen (checked against the real dz), every pixel can start at
+ * that iteration with dz from the series. 10 % margin, and not past the earliest escaping probe.
+ */
+void Fractalis::compute_series() {
+    series_generation = ref.generation;
+    pass_view.series_skip = 0;
+    if (pass_view.zoom >= SCALED_PERTURBATION_MIN_ZOOM || pass_view.trap != TRAP_OFF || ref.length < 16) return;
+    const uint64_t started = now_us();
+    int limit = ref.length - 2;
+    if (probe_escaped > 0) limit = std::min(limit, probe_results[0].iterations * 9 / 10);  // sorted by iterations
+    const double offset_r = (pass_view.center.real - ref.c.real).to_double();
+    const double offset_i = (pass_view.center.imag - ref.c.imag).to_double();
+    constexpr int POINTS = 9;
+    Complex dc[POINTS], dc_power[POINTS][4], dz[POINTS];
+    for (int k = 0; k < POINTS; ++k) {
+        int x = (k % 3) * (state->screen_w - 1) / 2, y = (k / 3) * (state->screen_h - 1) / 2;
+        dc[k] = {offset_r + (x + 0.5 - state->screen_w / 2.0) * pass_view.step,
+                 offset_i + (y + 0.5 - state->screen_h / 2.0) * pass_view.step};
+        dc_power[k][0] = dc[k];
+        for (int j = 1; j < 4; ++j) dc_power[k][j] = dc_power[k][j - 1] * dc[k];
+        dz[k] = {0, 0};
+    }
+    auto next_coefficients = [](const Complex* s, const Complex& big_z, Complex* out) {
+        for (int k = 0; k < 4; ++k) {
+            Complex v = (big_z + big_z) * s[k];
+            for (int j = 0; j < k; ++j) v = v + s[j] * s[k - 1 - j];
+            if (k == 0) v.r += 1;
+            out[k] = v;
+        }
+    };
+    Complex s[4] = {}, next[4];
+    int n = 0;
+    for (; n < limit; ++n) {
+        const Complex big_z = {ref.orbit[2 * n], ref.orbit[2 * n + 1]};
+        const Complex big_z1 = {ref.orbit[2 * n + 2], ref.orbit[2 * n + 3]};
+        next_coefficients(s, big_z, next);
+        bool exact = true;
+        for (int k = 0; k < POINTS && exact; ++k) {
+            dz[k] = ((big_z + big_z) + dz[k]) * dz[k] + dc[k];
+            Complex series = {0, 0};
+            for (int j = 0; j < 4; ++j) series = series + next[j] * dc_power[k][j];
+            Complex z = big_z1 + dz[k];
+            exact = (series - dz[k]).norm() <= 1e-12 * dz[k].norm() && z.norm() >= dz[k].norm()
+                    && z.norm() <= BAILOUT_SQ;
+        }
+        if (!exact) break;
+        for (int k = 0; k < 4; ++k) s[k] = next[k];
+    }
+    const int skip = n * 9 / 10;
+    if (skip < 8) return;
+    // The coefficients at the skip
+    for (int k = 0; k < 4; ++k) s[k] = {0, 0};
+    for (int m = 0; m < skip; ++m) {
+        next_coefficients(s, {ref.orbit[2 * m], ref.orbit[2 * m + 1]}, next);
+        for (int k = 0; k < 4; ++k) s[k] = next[k];
+    }
+    pass_view.series_skip = skip;
+    for (int k = 0; k < 4; ++k) {
+        pass_view.series_r[k] = s[k].r;
+        pass_view.series_i[k] = s[k].i;
+    }
+    printf("Series approximation: pixels skip %d iterations (%lu ms)\n", skip,
+           static_cast<unsigned long>((now_us() - started) / 1000));
 }
 
 int Fractalis::probe_percentile(float share) const {
@@ -959,8 +1242,8 @@ void Fractalis::begin_view_passes() {
         first = std::max(FIRST_PASS_ITER, std::min(first_limit_hint, target));
         if (first * 3 / 2 >= target) first = target;
     } else if (probe_escaped > 0) {
-        // Below the point where the first few percent of the probes escape, a pass would only draw black
-        first = std::max(FIRST_PASS_ITER, std::min(probe_percentile(0.05f), target));
+        // Like the hint: where 3/4 of the probes escaped. Lower, the pass would mostly be calculated again.
+        first = std::max(FIRST_PASS_ITER, std::min(probe_percentile(0.75f) * 5 / 4, target));
         if (first * 3 / 2 >= target) first = target;
     } else {
         first = next_pass_limit(std::max(FIRST_PASS_ITER, target / 16) / 2, target);
@@ -1000,6 +1283,7 @@ int Fractalis::next_pass_limit(int limit, int target) const {
 }
 
 void Fractalis::begin_pass(int limit, int target) {
+    resume_limit = pass_limit;
     pass_limit = limit;
     pass_target = target;
     pass_resolved = 0;
@@ -1045,7 +1329,10 @@ void Fractalis::finish_pass() {
     // Count the pixels that are still undecided. Supersampled right away: also the ones with sub-samples in the set,
     // a higher limit can change their share.
     const bool right_away = right_away_pass();
-    auto undecided = [right_away](const PixelState& p) { return p.isInSet() || (right_away && p.coverage() > 0); };
+    auto undecided = [right_away](const PixelState& p) {
+        if (p.isProven()) return false;  // stays in the set at any limit
+        return p.isInSet() || (right_away && p.coverage() > 0);
+    };
     int unresolved = 0;
     for (int y = 0; y < state->screen_h; ++y) {
         for (int x = 0; x < state->screen_w; ++x) {
@@ -1124,6 +1411,29 @@ void Fractalis::store_result(int x, int y, const PixelState& result, const Pixel
     }
     stats.pass_pixels++;
     PixelState& target = state->pixelState[y][x];
+
+    // Black pixels get marked: proven (not calculated again) or undecided with their z stored (continues there)
+    PixelState marked = result;
+    if (!ss_pass && !probe_pass && result.isBlack() && pass_view.trap == TRAP_OFF) {
+        if (!info.ran_out) {
+            marked.setInSetProven();
+        } else if (info.has_state && !pass_view.perturbed && !ref.busy) {
+            int slot = target.isResumable() ? target.color : resume_slots <= MAX_ITER ? resume_slots++ : -1;
+            if (slot >= 0) {
+                // The orbit buffer holds the stored z now, the reference is gone
+                if (ref.length > 0) {
+                    ref.length = 0;
+                    ref.escaped = false;
+                    ref.generation++;
+                    ref.minibrot = Reference::MINIBROT_UNKNOWN;
+                }
+                ref.orbit[2 * slot] = info.zr;
+                ref.orbit[2 * slot + 1] = info.zi;
+                marked.setInSetResumable(static_cast<uint16_t>(slot));
+            }
+        }
+    }
+
     if (ss_pass) {
         target = result;
     } else if (!undecided_in_set_ && result.isInSet() && !result.showsColor() && info.ran_out
@@ -1144,7 +1454,7 @@ void Fractalis::store_result(int x, int y, const PixelState& result, const Pixel
         } else if (near && near->showsColor()) {
             target.setInSetColored(near->position());
         } else {
-            target = result;
+            target = marked;
         }
     } else if (right_away_pass()) {
         // Pixels with sub-samples in the set are calculated again in the next pass. Like without supersampling, they
@@ -1152,7 +1462,7 @@ void Fractalis::store_result(int x, int y, const PixelState& result, const Pixel
         if (!result.isInSet() && (target.isInSet() || !target.isValid())) pass_resolved++;
         target = result;
     } else {
-        target = result;
+        target = marked;
         if (!result.isInSet()) pass_resolved++;
     }
 }
@@ -1390,6 +1700,9 @@ bool Fractalis::work(bool (*interrupt)()) {
                 || (pass_view.perturbed && !reference_ready())) {
             return true;  // changed in the mean time, try again
         }
+        if (pass_view.perturbed && !probe_pass && !ss_pass && series_generation != ref.generation) {
+            compute_series();
+        }
         int batch = pass_view.zoom < FLOAT_MAX_ZOOM ? MAX_BATCH
                   : pass_view.perturbed ? 8
                   : pass_view.zoom < DOUBLE_MAX_ZOOM ? 4 : 1;
@@ -1398,9 +1711,20 @@ bool Fractalis::work(bool (*interrupt)()) {
         }
         right_away = right_away_pass();
         supersampling = ss_pass;
+        // Undecided float pixels of the pass before continue from their stored z
+        const bool resume = !pass_view.perturbed && !supersampling && !right_away && !probe_pass
+                            && resume_limit > 0 && resume_limit < pass_limit;
         while (count < batch && claim_pixel(xs[count], ys[count])) {
+            const PixelState& pixel = state->pixelState[ys[count]][xs[count]];
             if (supersampling) {
-                results[count] = state->pixelState[ys[count]][xs[count]];  // the center sample
+                results[count] = pixel;  // the center sample
+            }
+            infos[count].has_state = false;
+            if (resume && pixel.isResumable()) {
+                infos[count].has_state = true;
+                infos[count].zr = ref.orbit[2 * pixel.color];
+                infos[count].zi = ref.orbit[2 * pixel.color + 1];
+                infos[count].n = resume_limit;
             }
             count++;
         }
@@ -1429,11 +1753,16 @@ bool Fractalis::work(bool (*interrupt)()) {
                 view.scale_r = ref.scale_r;
                 view.scale_i = ref.scale_i;
             }
+            // The series belongs to the reference it was calculated with
+            if (series_generation != ref.generation || view.series_skip >= ref.length) {
+                view.series_skip = 0;
+            }
         }
         in_flight++;
     }
 
     int done = 0;
+    const uint32_t cycles_started = cycle_counter ? cycle_counter() : 0;
     while (done < count) {
         bool calculated = supersampling
             ? supersample_pixel(xs[done], ys[done], view, iter_limit, id, interrupt, results[done])
@@ -1447,8 +1776,12 @@ bool Fractalis::work(bool (*interrupt)()) {
         done++;
     }
 
+    const uint32_t cycles = cycle_counter ? cycle_counter() - cycles_started : 0;
     LockGuard guard(lock);
     in_flight--;
+    stats.cycles += cycles;
+    for (int i = 0; i < done; ++i) stats.iterations += static_cast<uint32_t>(infos[i].work);
+    stats.pixels += done;
     // Throw the results away, if the view changed in the mean time
     if (id != state->calculation_id) {
         return true;
