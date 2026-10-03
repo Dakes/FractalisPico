@@ -16,7 +16,6 @@
 #include "AutoZoom.hpp"
 #include "globals.h"
 #include "palette.h"
-#include "doubledouble.h"
 #include "StripDisplay.hpp"
 #include "Settings.hpp"
 #include <cmath>
@@ -25,7 +24,6 @@
 #include <unistd.h>
 
 using namespace pimoroni;
-using namespace doubledouble;
 
 // Set to the width and height of your pimoroni display
 const uint16_t width = 320;
@@ -34,7 +32,7 @@ const uint16_t height = 240;
 ST7789 st7789(width, height, ROTATE_0, false, get_spi_pins(BG_SPI_FRONT));
 // RGB565 for smooth color gradients (RGB332 only has 256 colors), drawn in strips instead of a full frame buffer
 StripDisplay display(st7789.width, st7789.height, get_spi_pins(BG_SPI_FRONT).spi);
-RGBLED led(PicoDisplay::LED_R, PicoDisplay::LED_G, PicoDisplay::LED_B);
+RGBLED led(LED_PIN_R, LED_PIN_G, LED_PIN_B);
 Button button_a(PicoDisplay::A);
 Button button_b(PicoDisplay::B);
 Button button_x(PicoDisplay::X);
@@ -79,10 +77,32 @@ int light = 0;
 float light_angle = LIGHT_ANGLES[0];
 bool overlay_visible = false;
 
+// Hidden: holding A + B jumps to these views in turn, to quickly test the deep zoom precision. Found by diving into
+// the seahorse valley. The first is at the limit of the old double-double precision, a few zoom steps further the
+// pixels switch to the scaled perturbation.
+struct TestLocation {
+    double zoom;
+    const char* real;
+    const char* imag;
+};
+const TestLocation TEST_LOCATIONS[] = {
+    {1e31, "-0.74363021764435289490180174187036443524444484224292785319222673934875385048",
+           "0.13179414728676452841409172905993588426705295774068735529074794881754614149"},
+    {1e42, "-0.74363021764435289490180174187040211824405527974597657765728802803897859062",
+           "0.13179414728676452841409172905996391973831127024373948657952815558406252255"},
+    {1e56, "-0.74363021764435289490180174187040211824405457485109184892410846142003846471",
+           "0.13179414728676452841409172905996391973831106931655758831013716385362019770"},
+    {1e66, "-0.74363021764435289490180174187040211824405457485109184891454625582422596510",
+           "0.13179414728676452841409172905996391973831106931655758830325963653618269806"},
+};
+constexpr int TEST_LOCATION_COUNT = sizeof(TEST_LOCATIONS) / sizeof(TEST_LOCATIONS[0]);
+int next_test_location = 0;
+
 void core1_entry();
 void update_display();
 void draw_strip(uint16_t* strip, int first_row, int rows);
 void update_led();
+void format_coordinate(const Fixed& value, int decimals, int line_length, char* out, size_t length);
 void render_overlay();
 void handle_input();
 void help_calculating();
@@ -178,6 +198,11 @@ int main() {
         if (state.calculation_id != seen_calculation) {
             seen_calculation = state.calculation_id;
             calculation_started_ms = now;
+            // The full coordinates, to find the view again
+            char real_text[100], imag_text[100];
+            format_coordinate(state.center.real, 74, 1000, real_text, sizeof(real_text));
+            format_coordinate(state.center.imag, 74, 1000, imag_text, sizeof(imag_text));
+            printf("View at zoom %.6e:\n  real %s\n  imag %s\n", state.zoom_factor, real_text, imag_text);
         }
         if (was_calculating && !calculating) {
             printf("View done in %lu ms\n", static_cast<unsigned long>(now - calculation_started_ms));
@@ -280,7 +305,7 @@ void help_calculating() {
 
 // The overlay texts of the current frame. Collected once per frame, then drawn into every strip they touch.
 struct OverlayText {
-    char text[120];
+    char text[220];
     Point position;
     const bitmap::font_t* font;
     int scale;
@@ -329,41 +354,37 @@ void draw_text(const char* text, Point position, int scale) {
 }
 
 /**
- * Prints a DoubleDouble with the given number of decimals. printf only knows double, which is not enough for
- * deep zooms.
+ * Prints a coordinate with the given number of decimals (cut off, not rounded), exactly: printf only knows double,
+ * which is not enough for deep zooms. Starts a new line, indented, every line_length characters.
  */
-void format_coordinate(DoubleDouble value, int decimals, char* out, size_t length) {
+void format_coordinate(const Fixed& value, int decimals, int line_length, char* out, size_t length) {
     size_t n = 0;
+    int column = 0;
     auto put = [&](char c) {
+        if (column == line_length && n + 4 < length) {
+            out[n++] = '\n';
+            out[n++] = ' ';
+            out[n++] = ' ';
+            column = 2;
+        }
         if (n + 1 < length) out[n++] = c;
+        column++;
     };
 
-    if (value.upper < 0) {
-        put('-');
-        value = -value;
-    } else {
-        put(' ');
-    }
-    double integer_part = std::floor(value.upper);
-    DoubleDouble fraction = value - integer_part;
-    if (fraction.upper < 0) {
-        integer_part -= 1;
-        fraction = fraction + 1.0;
-    }
-    char integer_text[24];
-    snprintf(integer_text, sizeof(integer_text), "%.0f", integer_part);
+    put(value.negative() ? '-' : ' ');
+    Fixed magnitude = value.negative() ? -value : value;
+    // The integer bits are the top bits of the most significant limb
+    constexpr int INTEGER_SHIFT = Fixed::FRACTION_BITS - 32 * (Fixed::LIMBS - 1);
+    constexpr uint32_t FRACTION_MASK = (1u << INTEGER_SHIFT) - 1;
+    uint32_t& top = magnitude.limb[Fixed::LIMBS - 1];
+    char integer_text[8];
+    snprintf(integer_text, sizeof(integer_text), "%lu", static_cast<unsigned long>(top >> INTEGER_SHIFT));
     for (const char* c = integer_text; *c; ++c) put(*c);
     put('.');
-
     for (int i = 0; i < decimals; ++i) {
-        fraction = fraction * 10.0;
-        int digit = static_cast<int>(std::floor(fraction.upper));
-        fraction = fraction - static_cast<double>(digit);
-        if (fraction.upper < 0) {
-            digit--;
-            fraction = fraction + 1.0;
-        }
-        put(static_cast<char>('0' + std::max(0, std::min(digit, 9))));
+        top &= FRACTION_MASK;
+        magnitude = magnitude.times(10);
+        put(static_cast<char>('0' + (top >> INTEGER_SHIFT)));
     }
     out[n] = '\0';
 }
@@ -429,14 +450,17 @@ void render_overlay() {
 
     // Enough decimals to tell neighboring pixels apart
     double pixel_size = 4.0 / state.zoom_factor / state.screen_w;
-    int decimals = std::max(6, std::min(32, static_cast<int>(std::ceil(-std::log10(pixel_size))) + 1));
-    char real_text[48];
-    char imag_text[48];
-    format_coordinate(state.center.real, decimals, real_text, sizeof(real_text));
-    format_coordinate(state.center.imag, decimals, imag_text, sizeof(imag_text));
+    int decimals = std::max(6, std::min(74, static_cast<int>(std::ceil(-std::log10(pixel_size))) + 1));
+    int line_length = (display.bounds.w - 2 * margin) / display.measure_text("0", scale, 1);
+    char real_text[100];
+    char imag_text[100];
+    format_coordinate(state.center.real, decimals, line_length, real_text, sizeof(real_text));
+    format_coordinate(state.center.imag, decimals, line_length, imag_text, sizeof(imag_text));
 
-    char coord_text[120];
+    char coord_text[sizeof(OverlayText::text)];
     snprintf(coord_text, sizeof(coord_text), "Coordinates:\n%s\n%s", real_text, imag_text);
+    int coord_lines = 1;
+    for (const char* c = coord_text; *c; ++c) coord_lines += *c == '\n';
 
     char zoom_text[30];
     if (state.zoom_factor < 1e3)
@@ -447,13 +471,14 @@ void render_overlay() {
     int info_y = margin*3 + font8_height;
     draw_text(coord_text, Point(margin, info_y), scale);
 
-    info_y += font8_height*3 + margin;
+    info_y += font8_height * coord_lines + margin;
     draw_text(zoom_text, Point(margin, info_y), scale);
 
     info_y += font8_height + margin;
     const char* precision = state.zoom_factor < FLOAT_MAX_ZOOM ? "float"
                           : state.zoom_factor < PERTURBATION_MIN_ZOOM ? "double"
-                          : state.zoom_factor < DOUBLE_DOUBLE_MAX_ZOOM ? "perturbation"
+                          : state.zoom_factor < SCALED_PERTURBATION_MIN_ZOOM ? "perturbation"
+                          : state.zoom_factor < PRECISION_MAX_ZOOM ? "deep perturbation"
                           : "past precision limit!";
     char iterations_text[48];
     snprintf(iterations_text, sizeof(iterations_text), "Iterations: %d (%s)", state.iteration_limit, precision);
@@ -622,6 +647,14 @@ void button_pressed(int i) {
     show_led_feedback(0, 0, 255, 50);
 }
 
+void jump_to_test_location() {
+    const TestLocation& l = TEST_LOCATIONS[next_test_location];
+    next_test_location = (next_test_location + 1) % TEST_LOCATION_COUNT;
+    printf("Jumping to the test location at zoom %g\n", l.zoom);
+    fractalis.set_view({Fixed::parse(l.real), Fixed::parse(l.imag)}, l.zoom);
+    show_led_feedback(255, 255, 255, 300);
+}
+
 // Long press of B, X and Y. Repeats while the button is held.
 void button_long_pressed(int i) {
     switch (i) {
@@ -640,7 +673,7 @@ void button_long_pressed(int i) {
 
 // Buttons are sampled by a timer interrupt, so short presses aren't missed while the main loop is busy.
 // The interrupt only records events, the actions run in the main loop.
-enum class ButtonEvent : uint8_t { PRESS, LONG, REPEAT, FUNCTION, FUNCTION2, FUNCTION3, FUNCTION4 };
+enum class ButtonEvent : uint8_t { PRESS, LONG, REPEAT, FUNCTION, FUNCTION2, FUNCTION3, FUNCTION4, TEST_JUMP };
 struct ButtonEventEntry {
     uint8_t button;
     ButtonEvent event;
@@ -665,6 +698,7 @@ void push_event(int button, ButtonEvent event) {
  *    Tap three times and then hold A for layer 4 (auto zoom): B pause after a finished view, X zoom step,
  *    Y full quality (wait for supersampling as well).
  * B, X, Y: short press pans left/right or zooms in, long press pans down/up or zooms out and repeats while held.
+ * Hidden: holding A + B for 2 s (after the reset view) jumps to the next deep zoom test location.
  */
 bool sample_buttons(repeating_timer_t*) {
     struct ButtonTracker {
@@ -711,7 +745,13 @@ bool sample_buttons(repeating_timer_t*) {
             }
         } else if (raw) {
             uint32_t held = now - b.pressed_at;
-            if (i == 0 || b.shifted) {
+            if (i == 0) {
+                continue;
+            } else if (b.shifted) {
+                if (i == 1 && a_layer == 1 && !b.long_fired && held >= TEST_JUMP_HOLD_MS) {
+                    b.long_fired = true;
+                    push_event(i, ButtonEvent::TEST_JUMP);
+                }
                 continue;
             } else if (!b.long_fired && held >= LONG_PRESS_MS) {
                 b.long_fired = true;
@@ -775,6 +815,9 @@ void handle_input() {
             case ButtonEvent::REPEAT:
                 button_long_pressed(button);
                 break;
+            case ButtonEvent::TEST_JUMP:
+                jump_to_test_location();
+                break;
         }
     }
 
@@ -813,8 +856,7 @@ Settings current_settings() {
 
 // Invalid values (e.g. from a broken record) fall back to the defaults
 void apply_settings(const Settings& s) {
-    bool view_valid = std::isfinite(s.center.real.upper) && std::isfinite(s.center.imag.upper)
-                      && std::isfinite(s.zoom) && s.zoom > 0;
+    bool view_valid = std::isfinite(s.zoom) && s.zoom > 0;
     if (view_valid)
         fractalis.set_view(s.center, s.zoom);
     color_palette.select(s.palette);

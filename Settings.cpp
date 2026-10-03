@@ -12,7 +12,7 @@ namespace {
 
 constexpr uint32_t MAGIC = 0x46524354;  // "FRCT"
 // Increment when the layout of Settings changes, older records are then ignored
-constexpr uint16_t VERSION = 1;
+constexpr uint16_t VERSION = 2;
 constexpr int SECTORS = 4;
 constexpr uint32_t STORAGE_SIZE = SECTORS * FLASH_SECTOR_SIZE;
 constexpr uint32_t STORAGE_OFFSET = PICO_FLASH_SIZE_BYTES - STORAGE_SIZE;

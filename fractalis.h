@@ -2,10 +2,7 @@
 #define FRACTALIS_H
 
 #include "FractalisState.h"
-#include "doubledouble.h"
 #include "sync.h"
-
-using namespace doubledouble;
 
 /**
  * Calculates the fractal. All public methods are safe to call from both cores.
@@ -70,6 +67,8 @@ public:
 private:
     struct View {
         Coordinate center;
+        // The center as double-double (center_r + center_r_low), for the iterations without perturbation
+        double center_r, center_r_low, center_i, center_i_low;
         double zoom;
         double step;  // size of one pixel in the complex plane
         // Single precision copies for the float calculation. The center is split in a high and low part, so c is
@@ -91,7 +90,7 @@ private:
     };
 
     /**
-     * Reference orbit for perturbation: Z_0 = 0, Z_n+1 = Z_n^2 + C, calculated in double-double and stored in
+     * Reference orbit for perturbation: Z_0 = 0, Z_n+1 = Z_n^2 + C, calculated in fixed point and stored in
      * single precision (re, im interleaved). It is calculated step by step up to the iteration limit of the pass
      * and kept as long as C is on or near the screen, so zooming and panning usually don't need a new one.
      */
@@ -100,7 +99,7 @@ private:
         int length;        // stored values
         bool escaped;      // the orbit escaped at the last stored value and can't be extended
         Coordinate c;
-        DoubleDouble zr, zi;  // last value, to continue the orbit
+        Fixed zr, zi;      // last value, to continue the orbit
         uint32_t generation;  // incremented when C changes
         bool busy;            // a core is calculating the orbit (outside of the lock)
         // C candidates of the current pass that escaped too early, in screen pixels

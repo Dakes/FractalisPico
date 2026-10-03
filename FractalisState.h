@@ -2,14 +2,12 @@
 #define FRACTALIS_STATE_H
 
 #include <cstdint>
-#include "doubledouble.h"
-
-using namespace doubledouble;
+#include "fixed.h"
 
 // Real and imaginary coordinates in the Mandelbrot fractal
 struct Coordinate {
-    DoubleDouble real;
-    DoubleDouble imag;
+    Fixed real;
+    Fixed imag;
 };
 
 /**

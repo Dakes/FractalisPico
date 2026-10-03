@@ -64,7 +64,7 @@ private:
     static constexpr int TILE_SIZE = 32;  // Size of tiles for detail analysis
     static constexpr double CENTER_BIAS = 1.5;  // Bias factor for center tiles
     // All the way down, until the precision runs out
-    static constexpr double MAX_ZOOM = DOUBLE_DOUBLE_MAX_ZOOM;
+    static constexpr double MAX_ZOOM = PRECISION_MAX_ZOOM;
 
     std::pair<int, int> calculateCenter(int tileX, int tileY);
     int measureTileDetail(int tileX, int tileY);

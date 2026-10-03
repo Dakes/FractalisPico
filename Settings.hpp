@@ -25,7 +25,7 @@ struct Settings {
     uint8_t auto_zoom_full_quality;
     uint8_t reserved[4];
 };
-static_assert(sizeof(Settings) == 56, "Settings must not contain padding");
+static_assert(sizeof(Settings) == 88, "Settings must not contain padding");
 
 /**
  * Stores the settings in the last sectors of the flash. Every save appends a record of one flash page, the newest

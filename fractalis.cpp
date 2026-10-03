@@ -36,19 +36,20 @@ inline float trap_distance(float zr, float zi, float magnitude_sq) {
  *   d' = 2 z d + pixel size,  counts once |d| > 1e-5 |z|
  * Once it counts, it counts for the rest of the orbit.
  */
+template <typename T>
 struct TrapScope {
-    float dr = 0, di = 0;
+    T dr = 0, di = 0;
     bool counting = false;
     // before z = z^2 + c, with the old z
-    void step(float zr, float zi, float pixel_size) {
+    void step(T zr, T zi, T pixel_size) {
         if (counting) return;
-        float nr = 2.0f * (zr * dr - zi * di) + pixel_size;
-        di = 2.0f * (zr * di + zi * dr);
+        T nr = 2 * (zr * dr - zi * di) + pixel_size;
+        di = 2 * (zr * di + zi * dr);
         dr = nr;
     }
     // after it, with the new |z|^2
-    bool counts(float magnitude_sq) {
-        if (!counting) counting = dr * dr + di * di > 1e-10f * magnitude_sq;
+    bool counts(T magnitude_sq) {
+        if (!counting) counting = dr * dr + di * di > T(1e-10) * magnitude_sq;
         return counting;
     }
 };
@@ -96,7 +97,7 @@ Escape iterate(T cr, T ci, int iter_limit, T epsilon, bool check_periodicity, fl
     T saved_r = 0, saved_i = 0;
     int save_at = 8;
     float trap = INFINITY;
-    TrapScope scope;
+    TrapScope<float> scope;
 
     for (int n = 0; n < iter_limit; ++n) {
         if (TRAP != Fractalis::TRAP_OFF) scope.step(static_cast<float>(zr), static_cast<float>(zi), pixel_size);
@@ -128,8 +129,7 @@ Escape iterate(T cr, T ci, int iter_limit, T epsilon, bool check_periodicity, fl
     return {iter_limit, 0.0f, true, false, trap};
 }
 
-// Lean double-double arithmetic for the inner loop. Accurate enough for iterating and skips the NaN/Inf handling
-// of the DoubleDouble class.
+// Lean double-double arithmetic for the iteration without perturbation
 struct DD {
     double hi, lo;
 };
@@ -156,6 +156,20 @@ inline DD dd_mul(DD a, DD b) {
     return quick_two_sum(p, e + (a.hi * b.lo + a.lo * b.hi));
 }
 
+// Far outside of the set, so the fixed point numbers don't overflow (range +-128)
+Fixed clamp_coordinate(const Fixed& value) {
+    constexpr double LIMIT = 16.0;
+    double v = value.to_double();
+    return v > LIMIT ? Fixed(LIMIT) : v < -LIMIT ? Fixed(-LIMIT) : value;
+}
+
+// z = z^2 + c in fixed point
+inline void square_add(Fixed& zr, Fixed& zi, const Fixed& cr, const Fixed& ci) {
+    Fixed zri = zr * zi;
+    zr = zr * zr - zi * zi + cr;
+    zi = zri.twice() + ci;
+}
+
 /**
  * Minibrots are (almost) exact copies of the whole set, so the main cardioid/bulb check also works for them in
  * minibrot coordinates (c - nucleus) / size. The copies are slightly distorted, so the check is done with a margin:
@@ -172,7 +186,7 @@ bool is_safely_in_main_bulb(float x, float y) {
 struct Minibrot {
     int period;
     bool usable;  // c is safely inside, so the check is worth it
-    double nr_hi, nr_lo, ni_hi, ni_lo;  // nucleus
+    Fixed nr, ni;  // nucleus
     bool cardioid;
     double scale_r, scale_i;  // see is_in_component()
 };
@@ -194,30 +208,31 @@ bool is_in_component(bool cardioid, float x, float y) {
  * Returns false if it didn't converge. usable is false if c isn't safely inside, then the period is still valid.
  */
 template <typename Interrupt>
-bool find_minibrot(DD cr, DD ci, int period, Minibrot& out, const Interrupt& interrupt) {
-    const DD c0r = cr, c0i = ci;
+bool find_minibrot(Fixed cr, Fixed ci, int period, Minibrot& out, const Interrupt& interrupt) {
+    const Fixed c0r = cr, c0i = ci;
     double last_step = INFINITY;
     bool converged = false;
     for (int step = 0; step < 12 && !converged; ++step) {
         if (interrupt()) return false;
-        DD zr = {0, 0}, zi = {0, 0};
+        Fixed zr = 0.0, zi = 0.0;
+        double zrd = 0, zid = 0;
         double dr = 0, di = 0;  // dz/dc
         for (int i = 0; i < period; ++i) {
-            double ndr = 2 * (zr.hi * dr - zi.hi * di) + 1;
-            di = 2 * (zr.hi * di + zi.hi * dr);
+            double ndr = 2 * (zrd * dr - zid * di) + 1;
+            di = 2 * (zrd * di + zid * dr);
             dr = ndr;
-            DD zri = dd_mul(zr, zi);
-            DD nzr = dd_add(dd_sub(dd_mul(zr, zr), dd_mul(zi, zi)), cr);
-            zi = dd_add({zri.hi * 2, zri.lo * 2}, ci);
-            zr = nzr;
-            if (zr.hi * zr.hi + zi.hi * zi.hi > 4.0) return false;
+            square_add(zr, zi, cr, ci);
+            zrd = zr.to_double();
+            zid = zi.to_double();
+            if (zrd * zrd + zid * zid > 4.0) return false;
         }
         double d = dr * dr + di * di;
         if (!(d > 0) || !std::isfinite(d)) return false;
-        double sr = (zr.hi * dr + zi.hi * di) / d;
-        double si = (zi.hi * dr - zr.hi * di) / d;
-        cr = dd_sub(cr, {sr, 0});
-        ci = dd_sub(ci, {si, 0});
+        double sr = (zrd * dr + zid * di) / d;
+        double si = (zid * dr - zrd * di) / d;
+        if (!(std::abs(sr) + std::abs(si) < 1.0)) return false;
+        cr -= Fixed(sr);
+        ci -= Fixed(si);
         // |z_period| relative to the size of the minibrot ~ 1 / |dz/dc|
         double step_size = std::sqrt((sr * sr + si * si) * d);
         converged = step_size < 1e-6;
@@ -231,16 +246,13 @@ bool find_minibrot(DD cr, DD ci, int period, Minibrot& out, const Interrupt& int
     double min_sq = INFINITY;
     int actual = period;
     {
-        DD zr, zi;
         // first pass: the smallest |z_k|, second pass: the first k that is about as small
         for (int pass = 0; pass < 2; ++pass) {
-            zr = zi = {0, 0};
+            Fixed zr = 0.0, zi = 0.0;
             for (int k = 1; k <= period; ++k) {
-                DD zri = dd_mul(zr, zi);
-                DD nzr = dd_add(dd_sub(dd_mul(zr, zr), dd_mul(zi, zi)), cr);
-                zi = dd_add({zri.hi * 2, zri.lo * 2}, ci);
-                zr = nzr;
-                double m = zr.hi * zr.hi + zi.hi * zi.hi;
+                square_add(zr, zi, cr, ci);
+                double zrd = zr.to_double(), zid = zi.to_double();
+                double m = zrd * zrd + zid * zid;
                 if (pass == 0) {
                     min_sq = std::min(min_sq, m);
                 } else if (period % k == 0 && m <= min_sq * 1e6) {
@@ -258,9 +270,9 @@ bool find_minibrot(DD cr, DD ci, int period, Minibrot& out, const Interrupt& int
     //   e = 1/2 + (l B + l' A) / (2 l^2 A^2)
     using complex = std::complex<double>;
     complex l = 1, dl = 0, b = 1, a = 0, a2 = 0;
-    DD zr = {0, 0}, zi = {0, 0};
+    Fixed zr = 0.0, zi = 0.0;
     for (int k = 0; k < actual; ++k) {
-        complex z(zr.hi, zi.hi);
+        complex z(zr.to_double(), zi.to_double());
         a2 = 2.0 * (a * a + z * a2);
         a = 2.0 * z * a + 1.0;
         if (k >= 1) {
@@ -268,10 +280,7 @@ bool find_minibrot(DD cr, DD ci, int period, Minibrot& out, const Interrupt& int
             l = 2.0 * z * l;
             b += 1.0 / l;
         }
-        DD zri = dd_mul(zr, zi);
-        DD nzr = dd_add(dd_sub(dd_mul(zr, zr), dd_mul(zi, zi)), cr);
-        zi = dd_add({zri.hi * 2, zri.lo * 2}, ci);
-        zr = nzr;
+        square_add(zr, zi, cr, ci);
     }
     complex e = 0.5 + (l * (a2 * 0.5) + dl * a) / (2.0 * l * l * a * a);
     out.cardioid = std::abs(e - 0.5) < 0.1;
@@ -282,13 +291,13 @@ bool find_minibrot(DD cr, DD ci, int period, Minibrot& out, const Interrupt& int
     out.scale_r = scale.real();
     out.scale_i = scale.imag();
     out.period = actual;
-    out.nr_hi = cr.hi; out.nr_lo = cr.lo;
-    out.ni_hi = ci.hi; out.ni_lo = ci.lo;
+    out.nr = cr;
+    out.ni = ci;
 
     // Only useful if the reference itself is inside
-    DD dcr = dd_sub(c0r, cr), dci = dd_sub(c0i, ci);
-    float x = static_cast<float>(dcr.hi * out.scale_r - dci.hi * out.scale_i);
-    float y = static_cast<float>(dcr.hi * out.scale_i + dci.hi * out.scale_r);
+    double dcr = (c0r - cr).to_double(), dci = (c0i - ci).to_double();
+    float x = static_cast<float>(dcr * out.scale_r - dci * out.scale_i);
+    float y = static_cast<float>(dcr * out.scale_i + dci * out.scale_r);
     out.usable = is_in_component(out.cardioid, x, y);
     return true;
 }
@@ -301,27 +310,26 @@ bool find_minibrot(DD cr, DD ci, int period, Minibrot& out, const Interrupt& int
  * Returns the radius (with a margin), 0 if there's no attracting cycle.
  */
 template <typename Interrupt>
-double interior_radius(DD zr, DD zi, DD cr, DD ci, int period, const Interrupt& interrupt) {
+double interior_radius(Fixed zr, Fixed zi, const Fixed& cr, const Fixed& ci, int period,
+                       const Interrupt& interrupt) {
     using complex = std::complex<double>;
     double last_step = INFINITY;
     for (int step = 0; step < 10; ++step) {
         if (interrupt()) return 0;
-        DD wr = zr, wi = zi;
+        Fixed wr = zr, wi = zi;
+        complex w(wr.to_double(), wi.to_double());
         complex fz = 1, fc = 0, fzz = 0, fzc = 0;
         for (int i = 0; i < period; ++i) {
-            complex w(wr.hi, wi.hi);
             fzz = 2.0 * (fz * fz + w * fzz);
             fzc = 2.0 * (fz * fc + w * fzc);
             fc = 2.0 * w * fc + 1.0;
             fz = 2.0 * w * fz;
-            DD wri = dd_mul(wr, wi);
-            DD nwr = dd_add(dd_sub(dd_mul(wr, wr), dd_mul(wi, wi)), cr);
-            wi = dd_add({wri.hi * 2, wri.lo * 2}, ci);
-            wr = nwr;
-            if (wr.hi * wr.hi + wi.hi * wi.hi > 4.0) return 0;
+            square_add(wr, wi, cr, ci);
+            w = complex(wr.to_double(), wi.to_double());
+            if (std::norm(w) > 4.0) return 0;
         }
         if (!(std::abs(fz) < 1.0)) return 0;
-        complex g = complex(dd_sub(wr, zr).hi, dd_sub(wi, zi).hi);
+        complex g = complex((wr - zr).to_double(), (wi - zi).to_double());
         complex delta = g / (fz - 1.0);
         double step_size = std::abs(delta);
         // Converged (as far as the precision goes): the derivatives at z are accurate enough
@@ -330,8 +338,8 @@ double interior_radius(DD zr, DD zi, DD cr, DD ci, int period, const Interrupt& 
             return std::isfinite(b) ? 0.9 * b / 4.0 : 0;
         }
         last_step = step_size;
-        zr = dd_sub(zr, {delta.real(), 0});
-        zi = dd_sub(zi, {delta.imag(), 0});
+        zr -= Fixed(delta.real());
+        zi -= Fixed(delta.imag());
     }
     return 0;
 }
@@ -340,7 +348,7 @@ template <int TRAP, typename Abort>
 Escape iterate_dd(DD cr, DD ci, int iter_limit, float pixel_size, const Abort& abort) {
     DD zr = {0, 0}, zi = {0, 0}, zr2 = {0, 0}, zi2 = {0, 0};
     float trap = INFINITY;
-    TrapScope scope;
+    TrapScope<float> scope;
 
     for (int n = 0; n < iter_limit; ++n) {
         if (TRAP != Fractalis::TRAP_OFF) scope.step(static_cast<float>(zr.hi), static_cast<float>(zi.hi), pixel_size);
@@ -375,32 +383,34 @@ Escape iterate_dd(DD cr, DD ci, int iter_limit, float pixel_size, const Abort& a
  * same cycle (typically inside the same minibrot). dz has the full single precision even where z itself doesn't,
  * it's only compared while small enough that its rounding stays far below epsilon.
  */
-template <int TRAP, typename Abort>
-Escape iterate_perturbed(const float* orbit, int orbit_length, float dcr, float dci, int iter_limit, float epsilon,
-                         float pixel_size, const Abort& abort) {
+template <int TRAP, typename T, typename Abort>
+Escape iterate_perturbed(const float* orbit, int orbit_length, T dcr, T dci, int iter_limit, T epsilon,
+                         T pixel_size, const Abort& abort) {
     float trap = INFINITY;
-    TrapScope scope;
-    float dzr = 0, dzi = 0;
+    TrapScope<T> scope;
+    T dzr = 0, dzi = 0;
     int m = 0;
-    float saved_zr = NAN, saved_zi = NAN, saved_dzr = 0, saved_dzi = 0;
+    float saved_zr = NAN, saved_zi = NAN;
+    T saved_dzr = 0, saved_dzi = 0;
     int save_at = 8;
-    const float max_compared_dz = epsilon * 1e6f;
+    const T max_compared_dz = epsilon * T(1e6);
     for (int n = 0; n < iter_limit; ++n) {
         if (TRAP != Fractalis::TRAP_OFF) scope.step(orbit[2 * m] + dzr, orbit[2 * m + 1] + dzi, pixel_size);
-        float ar = 2.0f * orbit[2 * m] + dzr;
-        float ai = 2.0f * orbit[2 * m + 1] + dzi;
-        float nr = ar * dzr - ai * dzi + dcr;
+        T ar = T(2) * orbit[2 * m] + dzr;
+        T ai = T(2) * orbit[2 * m + 1] + dzi;
+        T nr = ar * dzr - ai * dzi + dcr;
         dzi = ar * dzi + ai * dzr + dci;
         dzr = nr;
         m++;
-        float zr = orbit[2 * m] + dzr;
-        float zi = orbit[2 * m + 1] + dzi;
-        float magnitude_sq = zr * zr + zi * zi;
-        if (magnitude_sq > static_cast<float>(BAILOUT_SQ)) {
-            return {n + 1, magnitude_sq, false, false, trap};
+        T zr = orbit[2 * m] + dzr;
+        T zi = orbit[2 * m + 1] + dzi;
+        T magnitude_sq = zr * zr + zi * zi;
+        if (magnitude_sq > static_cast<T>(BAILOUT_SQ)) {
+            return {n + 1, static_cast<float>(magnitude_sq), false, false, trap};
         }
         if (TRAP != Fractalis::TRAP_OFF && scope.counts(magnitude_sq)) {
-            trap = std::min(trap, trap_distance<TRAP>(zr, zi, magnitude_sq));
+            trap = std::min(trap, trap_distance<TRAP>(static_cast<float>(zr), static_cast<float>(zi),
+                                                      static_cast<float>(magnitude_sq)));
         }
         if (magnitude_sq < dzr * dzr + dzi * dzi || m == orbit_length - 1) {
             dzr = zr;
@@ -420,6 +430,129 @@ Escape iterate_perturbed(const float* orbit, int orbit_length, float dcr, float 
             saved_zi = ref_i;
             saved_dzr = dzr;
             saved_dzi = dzi;
+            save_at *= 2;
+        }
+    }
+    return {iter_limit, 0.0f, true, false, trap};
+}
+
+/**
+ * Perturbation for deep zooms, where dc and dz are smaller than the smallest float (~1e-38). While dz is tiny, it is
+ * stored with its own exponent: dz = w * 2^e with w around 1, and the iteration runs on w:
+ *   w' = (2Z + w 2^e) w + dc 2^-e
+ * When w grows, e goes up in steps (renormalization) until it reaches 0, from there on it's the plain float
+ * iteration. A rebase can make dz tiny again, then e goes down again. All in single precision, only the
+ * renormalization (a few times per pixel) uses double.
+ */
+template <int TRAP, typename Abort>
+Escape iterate_perturbed_scaled(const float* orbit, int orbit_length, double dcr, double dci, int iter_limit,
+                                double pixel_size, const Abort& abort) {
+    constexpr int SHIFT = 16;
+    constexpr float UP = 0x1p16f, DOWN = 0x1p-16f;
+    float trap = INFINITY;
+    TrapScope<double> scope;
+    // e is a multiple of SHIFT, it starts where dc is around 1
+    const int min_e = std::min(0, std::ilogb(pixel_size) / SHIFT * SHIFT) - 2 * SHIFT;
+    int e = min_e + 2 * SHIFT;
+    float wr = 0, wi = 0;
+    float s, dr, di, tiny_z, epsilon, max_compared;
+    double s_double;
+    auto set_scale = [&]() {
+        s_double = std::ldexp(1.0, e);
+        s = e >= -126 ? static_cast<float>(s_double) : 0.0f;  // dz = w * s, 0 where dz is negligible next to Z
+        double scale = std::ldexp(1.0, -e);
+        dr = static_cast<float>(dcr * scale);
+        di = static_cast<float>(dci * scale);
+        // Rebasing (|z| < |dz|) is only possible where |Z| < 2 |dz| < 2^(e + SHIFT + 1)
+        tiny_z = e + SHIFT + 1 >= -126 ? std::ldexp(1.0f, e + SHIFT + 1) : 0.0f;
+        epsilon = static_cast<float>(pixel_size * 1e-3 * scale);
+        max_compared = epsilon * 1e6f;
+    };
+    set_scale();
+    int m = 0;
+    float saved_zr = NAN, saved_zi = NAN, saved_wr = 0, saved_wi = 0;
+    int saved_e = 0;
+    int save_at = 8;
+    for (int n = 0; n < iter_limit; ++n) {
+        float big_zr = orbit[2 * m], big_zi = orbit[2 * m + 1];
+        if (TRAP != Fractalis::TRAP_OFF) scope.step(big_zr + wr * s_double, big_zi + wi * s_double, pixel_size);
+        float ar = 2.0f * big_zr + wr * s;
+        float ai = 2.0f * big_zi + wi * s;
+        float nr = ar * wr - ai * wi + dr;
+        wi = ar * wi + ai * wr + di;
+        wr = nr;
+        m++;
+        big_zr = orbit[2 * m];
+        big_zi = orbit[2 * m + 1];
+        float zr = big_zr + wr * s;
+        float zi = big_zi + wi * s;
+        float magnitude_sq = zr * zr + zi * zi;
+        if (magnitude_sq > static_cast<float>(BAILOUT_SQ)) {
+            return {n + 1, magnitude_sq, false, false, trap};
+        }
+        if (TRAP != Fractalis::TRAP_OFF && scope.counts(magnitude_sq)) {
+            trap = std::min(trap, trap_distance<TRAP>(zr, zi, magnitude_sq));
+        }
+
+        // Rebase
+        if (m == orbit_length - 1) {
+            // The reference ends, z is not tiny then
+            wr = zr;
+            wi = zi;
+            m = 0;
+            e = 0;
+            set_scale();
+        } else if (e == 0) {
+            if (magnitude_sq < wr * wr + wi * wi) {
+                wr = zr;
+                wi = zi;
+                m = 0;
+            }
+        } else if (std::abs(big_zr) + std::abs(big_zi) < tiny_z) {
+            // Compare in units of 2^e: z / 2^e = Z / 2^e + w
+            float zwr = std::ldexp(big_zr, -e) + wr;
+            float zwi = std::ldexp(big_zi, -e) + wi;
+            if (zwr * zwr + zwi * zwi < wr * wr + wi * wi) {
+                wr = zwr;
+                wi = zwi;
+                m = 0;
+            }
+        }
+
+        // Renormalize
+        float size = std::abs(wr) + std::abs(wi);
+        if (e < 0 && size > UP) {
+            do {
+                wr *= DOWN;
+                wi *= DOWN;
+                e += SHIFT;
+                size *= DOWN;
+            } while (e < 0 && size > UP);
+            set_scale();
+        } else if (size < (e == 0 ? 0x1p-90f : DOWN) && size > 0 && e > min_e) {
+            do {
+                wr *= UP;
+                wi *= UP;
+                e -= SHIFT;
+                size *= UP;
+            } while (size < DOWN && e > min_e);
+            set_scale();
+        }
+
+        if ((n & ABORT_CHECK_MASK) == ABORT_CHECK_MASK && abort()) {
+            return {n, 0.0f, false, true};
+        }
+        float ref_r = orbit[2 * m], ref_i = orbit[2 * m + 1];
+        if (ref_r == saved_zr && ref_i == saved_zi && e == saved_e
+                && std::abs(wr - saved_wr) + std::abs(wi - saved_wi) < epsilon && size < max_compared) {
+            return {iter_limit, 0.0f, true, false, trap};
+        }
+        if (n == save_at) {
+            saved_zr = ref_r;
+            saved_zi = ref_i;
+            saved_wr = wr;
+            saved_wi = wi;
+            saved_e = e;
             save_at *= 2;
         }
     }
@@ -475,8 +608,8 @@ bool Fractalis::calculate_pixel(int x, int y, const View& view, int iter_limit, 
         // Offset from the center in the complex plane. Exact enough in double, even for deep zooms.
         double offset_r = (x + 0.5 + sub_x - state->screen_w / 2.0) * view.step;
         double offset_i = (y + 0.5 + sub_y - state->screen_h / 2.0) * view.step;
-        double cr = view.center.real.upper + offset_r;
-        double ci = view.center.imag.upper + offset_i;
+        double cr = view.center_r + offset_r;
+        double ci = view.center_i + offset_i;
         bool optimize = view.zoom < OPTIMIZATIONS_MAX_ZOOM;
 
         bool interior = optimize && is_in_main_bulb(cr, ci);
@@ -495,23 +628,33 @@ bool Fractalis::calculate_pixel(int x, int y, const View& view, int iter_limit, 
         if (interior && !trapped) {
             escape = {iter_limit, 0.0f, true, false};
         } else if (view.perturbed) {
-            float dcr = static_cast<float>(view.ref_offset_r + offset_r);
-            float dci = static_cast<float>(view.ref_offset_i + offset_i);
+            double dcr = view.ref_offset_r + offset_r;
+            double dci = view.ref_offset_i + offset_i;
             escape = with_trap(view.trap, [&](auto trap) {
+#ifdef DOUBLE_PERTURBATION
+                // For tests: the reference for the single precision versions
                 return iterate_perturbed<decltype(trap)::value>(view.orbit, view.orbit_length, dcr, dci, limit,
-                                                                static_cast<float>(view.step * 1e-3), view.step_f,
-                                                                abort);
+                                                                view.step * 1e-3, view.step, abort);
+#else
+                if (view.zoom >= SCALED_PERTURBATION_MIN_ZOOM) {
+                    return iterate_perturbed_scaled<decltype(trap)::value>(view.orbit, view.orbit_length, dcr, dci,
+                                                                           limit, view.step, abort);
+                }
+                return iterate_perturbed<decltype(trap)::value>(view.orbit, view.orbit_length,
+                                                                static_cast<float>(dcr), static_cast<float>(dci),
+                                                                limit, static_cast<float>(view.step * 1e-3),
+                                                                view.step_f, abort);
+#endif
             });
         } else if (view.zoom < DOUBLE_MAX_ZOOM) {
             escape = with_trap(view.trap, [&](auto trap) {
                 return iterate<decltype(trap)::value>(cr, ci, limit, view.step * 1e-3, optimize, view.step_f, abort);
             });
         } else {
-            DoubleDouble re = view.center.real + offset_r;
-            DoubleDouble im = view.center.imag + offset_i;
+            DD re = dd_add({view.center_r, view.center_r_low}, {offset_r, 0});
+            DD im = dd_add({view.center_i, view.center_i_low}, {offset_i, 0});
             escape = with_trap(view.trap, [&](auto trap) {
-                return iterate_dd<decltype(trap)::value>({re.upper, re.lower}, {im.upper, im.lower}, limit, view.step_f,
-                                                         abort);
+                return iterate_dd<decltype(trap)::value>(re, im, limit, view.step_f, abort);
             });
         }
         if (interior) escape.in_set = true;
@@ -665,13 +808,17 @@ void Fractalis::start_pass() {
     pass_view.center = state->center;
     pass_view.zoom = state->zoom_factor;
     pass_view.step = 4.0 / state->zoom_factor / state->screen_w;
-    pass_view.center_rf = static_cast<float>(pass_view.center.real.upper);
-    pass_view.center_if = static_cast<float>(pass_view.center.imag.upper);
-    pass_view.center_rf_low = static_cast<float>((pass_view.center.real - pass_view.center_rf).upper);
-    pass_view.center_if_low = static_cast<float>((pass_view.center.imag - pass_view.center_if).upper);
+    pass_view.center_r = pass_view.center.real.to_double();
+    pass_view.center_i = pass_view.center.imag.to_double();
+    pass_view.center_r_low = (pass_view.center.real - Fixed(pass_view.center_r)).to_double();
+    pass_view.center_i_low = (pass_view.center.imag - Fixed(pass_view.center_i)).to_double();
+    pass_view.center_rf = static_cast<float>(pass_view.center_r);
+    pass_view.center_if = static_cast<float>(pass_view.center_i);
+    pass_view.center_rf_low = static_cast<float>((pass_view.center.real - Fixed(pass_view.center_rf)).to_double());
+    pass_view.center_if_low = static_cast<float>((pass_view.center.imag - Fixed(pass_view.center_if)).to_double());
     pass_view.step_f = static_cast<float>(pass_view.step);
     pass_view.trap = trap_mode;
-    pass_view.perturbed = pass_view.zoom >= PERTURBATION_MIN_ZOOM && pass_view.zoom < DOUBLE_DOUBLE_MAX_ZOOM;
+    pass_view.perturbed = pass_view.zoom >= PERTURBATION_MIN_ZOOM;
 
     returned_count = 0;
 
@@ -679,8 +826,8 @@ void Fractalis::start_pass() {
     // single precision dc.
     bool keep_reference = ref.length > 0 || ref.busy;
     if (keep_reference) {
-        double dx = (ref.c.real - pass_view.center.real).upper / pass_view.step;
-        double dy = (ref.c.imag - pass_view.center.imag).upper / pass_view.step;
+        double dx = (ref.c.real - pass_view.center.real).to_double() / pass_view.step;
+        double dy = (ref.c.imag - pass_view.center.imag).to_double() / pass_view.step;
         keep_reference = std::abs(dx) < state->screen_w && std::abs(dy) < state->screen_w;
     }
 
@@ -872,24 +1019,25 @@ void Fractalis::choose_reference() {
         ref.tried_y[ref.tries] = static_cast<int16_t>(best_y);
     }
     ref.tries++;
-    // The pixel center, exactly like calculate_pixel()
+    // The pixel center, like calculate_pixel()
     Coordinate c = pass_view.center;
-    c.real += (best_x + 0.5 - state->screen_w / 2.0) * pass_view.step;
-    c.imag += (best_y + 0.5 - state->screen_h / 2.0) * pass_view.step;
+    Fixed half_step(pass_view.step / 2);
+    c.real += half_step.times(2 * best_x + 1 - state->screen_w);
+    c.imag += half_step.times(2 * best_y + 1 - state->screen_h);
     set_reference(c);
 }
 
 bool Fractalis::extend_reference(uint32_t id, int target_length, bool (*interrupt)()) {
     uint32_t generation;
-    DD cr, ci, zr, zi;
+    Fixed cr, ci, zr, zi;
     int n;
     {
         LockGuard guard(lock);
         generation = ref.generation;
-        cr = {ref.c.real.upper, ref.c.real.lower};
-        ci = {ref.c.imag.upper, ref.c.imag.lower};
-        zr = {ref.zr.upper, ref.zr.lower};
-        zi = {ref.zi.upper, ref.zi.lower};
+        cr = ref.c.real;
+        ci = ref.c.imag;
+        zr = ref.zr;
+        zi = ref.zi;
         n = ref.length;
     }
 
@@ -897,21 +1045,20 @@ bool Fractalis::extend_reference(uint32_t id, int target_length, bool (*interrup
     float* orbit = ref.orbit;
     if (n == 0) {
         orbit[0] = orbit[1] = 0.0f;
-        zr = zi = {0, 0};
+        zr = zi = 0.0;
         n = 1;
     }
     bool escaped = false;
     bool aborted = false;
     while (n < target_length) {
-        DD zr2 = dd_mul(zr, zr);
-        DD zi2 = dd_mul(zi, zi);
-        DD zri = dd_mul(zr, zi);
-        zi = dd_add({zri.hi * 2, zri.lo * 2}, ci);
-        zr = dd_add(dd_sub(zr2, zi2), cr);
-        orbit[2 * n] = static_cast<float>(zr.hi);
-        orbit[2 * n + 1] = static_cast<float>(zi.hi);
+        square_add(zr, zi, cr, ci);
+        float fr = static_cast<float>(zr.to_double());
+        float fi = static_cast<float>(zi.to_double());
+        orbit[2 * n] = fr;
+        orbit[2 * n + 1] = fi;
         n++;
-        if (zr.hi * zr.hi + zi.hi * zi.hi > BAILOUT_SQ) {
+        // Escaped. Not further: the fixed point range ends at 128. Pixels rebase at the end of the orbit.
+        if (fr * fr + fi * fi > 4.0f) {
             escaped = true;
             break;
         }
@@ -945,8 +1092,8 @@ bool Fractalis::extend_reference(uint32_t id, int target_length, bool (*interrup
         // Also an aborted orbit is valid as far as it got
         ref.length = n;
         ref.escaped = escaped;
-        ref.zr = DoubleDouble(zr.hi, zr.lo);
-        ref.zi = DoubleDouble(zi.hi, zi.lo);
+        ref.zr = zr;
+        ref.zi = zi;
 
         if (escaped && n <= pass_limit && id == pass_id && pass_view.perturbed) {
             // Pixels that need more iterations than the reference has would lose their precision
@@ -970,7 +1117,7 @@ bool Fractalis::extend_reference(uint32_t id, int target_length, bool (*interrup
         return !aborted;
     }
 
-    // Takes a few thousand double-double iterations, the orbit is already usable in the mean time
+    // Takes a few thousand fixed point iterations, the orbit is already usable in the mean time
     bool interrupted = false;
     auto check_interrupt = [&]() {
         return interrupted = interrupt && interrupt();
@@ -988,7 +1135,7 @@ bool Fractalis::extend_reference(uint32_t id, int target_length, bool (*interrup
             ref.minibrot = Reference::MINIBROT_FOUND;
             ref.component_check = minibrot.usable;
             ref.period = minibrot.period;
-            ref.nucleus = {DoubleDouble(minibrot.nr_hi, minibrot.nr_lo), DoubleDouble(minibrot.ni_hi, minibrot.ni_lo)};
+            ref.nucleus = {minibrot.nr, minibrot.ni};
             ref.cardioid = minibrot.cardioid;
             ref.scale_r = minibrot.scale_r;
             ref.scale_i = minibrot.scale_i;
@@ -1070,16 +1217,16 @@ bool Fractalis::work(bool (*interrupt)()) {
         view = pass_view;
         iter_limit = pass_limit;
         if (view.perturbed) {
-            view.ref_offset_r = (view.center.real - ref.c.real).upper;
-            view.ref_offset_i = (view.center.imag - ref.c.imag).upper;
+            view.ref_offset_r = (view.center.real - ref.c.real).to_double();
+            view.ref_offset_i = (view.center.imag - ref.c.imag).to_double();
             view.orbit = ref.orbit;
             view.orbit_length = ref.length;
             view.minibrot = ref.minibrot == Reference::MINIBROT_FOUND && ref.component_check;
             view.interior_radius_sq = ref.minibrot == Reference::MINIBROT_FOUND
                                     ? ref.interior_radius * ref.interior_radius : 0;
             if (view.minibrot) {
-                view.nucleus_offset_r = (view.center.real - ref.nucleus.real).upper;
-                view.nucleus_offset_i = (view.center.imag - ref.nucleus.imag).upper;
+                view.nucleus_offset_r = (view.center.real - ref.nucleus.real).to_double();
+                view.nucleus_offset_i = (view.center.imag - ref.nucleus.imag).to_double();
                 view.cardioid = ref.cardioid;
                 view.scale_r = ref.scale_r;
                 view.scale_i = ref.scale_i;
@@ -1140,9 +1287,9 @@ void Fractalis::pan(double dx, double dy) {
 
     LockGuard guard(lock);
     // Move by whole pixels, so the already calculated pixels stay exactly aligned
-    double step = 4.0 / state->zoom_factor / state->screen_w;
-    state->center.real += DoubleDouble(shift_x) * step;
-    state->center.imag += DoubleDouble(shift_y) * step;
+    Fixed step(4.0 / state->zoom_factor / state->screen_w);
+    state->center.real = clamp_coordinate(state->center.real + step.times(shift_x));
+    state->center.imag = clamp_coordinate(state->center.imag + step.times(shift_y));
     state->shiftPixelState(-shift_x, -shift_y);
     first_limit_hint = estimate_first_limit();
     request_calculation();
@@ -1154,7 +1301,7 @@ void Fractalis::reset_view() {
 
 void Fractalis::set_view(const Coordinate& center, double zoom) {
     LockGuard guard(lock);
-    state->center = center;
+    state->center = {clamp_coordinate(center.real), clamp_coordinate(center.imag)};
     state->zoom_factor = zoom;
     state->resetPixelComplete();
     first_limit_hint = 0;

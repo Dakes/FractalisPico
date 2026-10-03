@@ -11,6 +11,11 @@
 #define CORE0_WORK_MS 20         // How long core0 helps calculating before it checks input again
 #define COLOR_CYCLE_SPEED 0.04f  // Palette cycles per second during auto zoom. 0 = off
 
+// RGB LED pins. Display Pack 2.8": 26, 27, 28. Display Pack 1.14" and 2.0": 6, 7, 8
+#define LED_PIN_R 26
+#define LED_PIN_G 27
+#define LED_PIN_B 28
+
 // Wait this long for a serial terminal at startup when DEBUG is enabled
 #define USB_WAIT_MS 1000
 
@@ -25,27 +30,34 @@
 #define LONG_PRESS_MS 350
 #define DOUBLE_TAP_MS 300        // A tap followed by a press within this time selects the second function layer
 #define REPEAT_MS 250            // Repeat interval of long press actions while the button is held
+#define TEST_JUMP_HOLD_MS 2000   // Holding A + B this long jumps to the next deep test location
 
 #define PAN_CONSTANT 0.1
 #define ZOOM_CONSTANT 0.1
 
+#ifndef MAX_ITER
 #define MAX_ITER 10000
+#endif
 
 // Precision switches. Float is by far the fastest on the RP2350 (single precision FPU), double is a good bit
-// slower (DCP coprocessor), DoubleDouble needs many double operations per step.
+// slower (DCP coprocessor), double-double needs many double operations per step.
 #ifndef FLOAT_MAX_ZOOM
 #define FLOAT_MAX_ZOOM 1e4
 #endif
 #ifndef DOUBLE_MAX_ZOOM
 #define DOUBLE_MAX_ZOOM 5e11
 #endif
-// Beyond this even DoubleDouble runs out of precision (~32 digits) and pixels become blocky
-#define DOUBLE_DOUBLE_MAX_ZOOM 1e31
-// From here up to DOUBLE_DOUBLE_MAX_ZOOM pixels are calculated with perturbation: in single precision relative to
-// a double-double reference orbit. Between FLOAT_MAX_ZOOM and this, pixels are calculated in double.
+// From here on pixels are calculated with perturbation: in single precision relative to a reference orbit in fixed
+// point (see fixed.h). Between FLOAT_MAX_ZOOM and this, pixels are calculated in double.
 #ifndef PERTURBATION_MIN_ZOOM
 #define PERTURBATION_MIN_ZOOM FLOAT_MAX_ZOOM
 #endif
+// From here on the pixel distances get too small for single precision (~1e-38), they get their own exponent
+#ifndef SCALED_PERTURBATION_MIN_ZOOM
+#define SCALED_PERTURBATION_MIN_ZOOM 1e32
+#endif
+// Beyond this the fixed point coordinates (~74 digits) run out of precision
+#define PRECISION_MAX_ZOOM 1e70
 // Above this zoom level the main cardioid/bulb check and periodicity checks are not precise enough
 #define OPTIMIZATIONS_MAX_ZOOM 1e7
 // Every calculation starts with a low iteration limit, which doubles with every pass
