@@ -59,6 +59,7 @@ add_executable(${NAME}
     Menu.cpp
     Ui.cpp
     MinibrotFinder.cpp
+    BulbNamer.cpp
     UsbDrive.cpp
     UsbDevice.cpp
 )

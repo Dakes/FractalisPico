@@ -31,6 +31,7 @@
 #define BUTTON_DEBOUNCE_SAMPLES 4
 #define LONG_PRESS_MS 350
 #define REPEAT_MS 250            // Repeat interval of long press actions while the button is held
+#define TAP_HOLD_MS 350          // A press this soon after a tap of the same button: held, it repeats the tap
 #define MENU_REPEAT_MS 120       // Holding X or Y in the menu moves the cursor this often
 
 // The menu closes by itself after this long without a button press

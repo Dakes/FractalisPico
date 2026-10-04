@@ -1,5 +1,6 @@
 #include "Ui.hpp"
 #include "Menu.hpp"
+#include "BulbNamer.hpp"
 #include "MinibrotFinder.hpp"
 #include "UsbDrive.hpp"
 #include "globals.h"
@@ -200,11 +201,13 @@ MinibrotFinder finder;
 uint32_t search_started_ms = 0;
 uint32_t search_seconds = 0;  // shown in the message
 int target_period = 0;        // of the minibrot auto zoom dives to
+uint32_t where_calculation = 0;  // the view "where am I" describes (see below)
 int glow_cell = -1;           // the minibrot glow uses the finder too: the cell it probes, -1 = none
+bool where_probing = false;   // and "where am I"
 
-// A search started from the menu, not the glow
+// A search started from the menu, not the glow or "where am I"
 bool user_search() {
-    return finder.busy() && glow_cell < 0;
+    return finder.busy() && glow_cell < 0 && !where_probing;
 }
 
 // The menu offers x1e10 to x1e70
@@ -262,7 +265,11 @@ void find_minibrot(int depth) {
         show_led_feedback(255, 0, 0, 300);
         return;
     }
-    glow_cell = -1;  // the glow scan starts over after it
+    glow_cell = -1;  // the glow scan and "where am I" start over after it
+    if (where_probing) {
+        where_probing = false;
+        where_calculation--;  // not the current one any more
+    }
     finder.start(starts, count, finder_depth(depth));
     search_started_ms = now_ms();
     search_seconds = 0;
@@ -1258,6 +1265,193 @@ void glow_set(int, int v) {
     state.needs_redraw = true;
 }
 
+// ---- Where am I ----
+
+/**
+ * What lies under the center point, for the info overlay. Once a view is done, core0
+ * 1. iterates the center: escaped (when, and how far from the set by the distance estimate) or the cycle it settles in
+ * 2. inside the set: names the bulb it's in (BulbNamer)
+ * 3. probes the disc around the screen for the biggest minibrot in view (MinibrotFinder::probe())
+ */
+constexpr int WHERE_MIN_ITERATIONS = 2000;  // inside, the orbit has to settle in its cycle
+constexpr int WHERE_MAX_ITERATIONS = 20000;
+BulbNamer namer;
+Fixed where_zr, where_zi;   // the orbit at the end
+bool where_probe_started = false;
+bool where_ready = false;   // the orbit part, for where_calculation
+bool where_done = false;    // the probe too
+int where_escape = 0;       // iteration it escaped at, 0 = it didn't
+float where_distance = 0;   // from the set in pixels, when it escaped
+int where_cycle = 0;        // the cycle it settled in, 0 = none found
+int where_limit = 0;        // iterations done
+bool where_minibrot = false;
+int where_period = 0;
+double where_minibrot_zoom = 0;
+float where_minibrot_px = 0;  // distance of its nucleus from the center, in pixels
+
+void where_orbit() {
+    where_escape = where_cycle = 0;
+    where_distance = 0;
+    where_limit = std::clamp(static_cast<int>(state.iteration_limit), WHERE_MIN_ITERATIONS, WHERE_MAX_ITERATIONS);
+    std::complex<float> history[ORBIT_HISTORY];
+    Fixed zr(0.0), zi(0.0);
+    std::complex<double> dz = 0;
+    for (int n = 1; n <= where_limit; ++n) {
+        const std::complex<double> z_old(zr.to_double(), zi.to_double());
+        dz = 2.0 * z_old * dz + 1.0;
+        const Fixed zr2 = zr * zr, zi2 = zi * zi;
+        zi = (zr * zi).twice() + state.center.imag;
+        zr = zr2 - zi2 + state.center.real;
+        std::complex<double> z(zr.to_double(), zi.to_double());
+        history[n % ORBIT_HISTORY] = {static_cast<float>(z.real()), static_cast<float>(z.imag())};
+        if (std::norm(z) > 4.0) {
+            where_escape = n;
+            // On in double until |z| is big, the distance estimate needs it: |z| log|z| / |dz|
+            const std::complex<double> c(state.center.real.to_double(), state.center.imag.to_double());
+            for (int i = 0; i < 64 && std::norm(z) < 1e20; ++i) {
+                dz = 2.0 * z * dz + 1.0;
+                z = z * z + c;
+            }
+            const double r = std::abs(z);
+            where_distance = static_cast<float>(r * std::log(r) / std::abs(dz) / glow_pixel());
+            return;
+        }
+    }
+    where_zr = zr;
+    where_zi = zi;
+    // Like the orbit viewer
+    const std::complex<float> last = history[where_limit % ORBIT_HISTORY];
+    for (int k = 1; k < ORBIT_HISTORY && k < where_limit; ++k) {
+        if (std::abs(history[(where_limit - k) % ORBIT_HISTORY] - last) < 1e-3f) {
+            where_cycle = k;
+            break;
+        }
+    }
+}
+
+// Core0 work, returns false when there's nothing to do
+bool where_work() {
+    if (hud == HUD_OFF) return false;
+    if (state.calculation_id != where_calculation) {
+        if (where_probing) finder.stop();
+        namer.stop();
+        where_probing = where_probe_started = false;
+        where_ready = where_done = false;
+        where_calculation = state.calculation_id;
+    }
+    if (where_done || state.calculating) return false;
+    if (!where_ready) {
+        where_orbit();
+        where_ready = true;
+        if (!where_escape) namer.start(state.center, where_zr, where_zi, where_cycle);
+        state.needs_redraw = true;
+        return true;
+    }
+    const uint32_t until = now_ms() + CORE0_WORK_MS;
+    if (namer.busy()) {
+        while (namer.work(256)) {
+            if (static_cast<int32_t>(until - now_ms()) <= 0) return true;
+        }
+        state.needs_redraw = true;
+        return true;
+    }
+    if (!where_probe_started) {
+        where_probe_started = true;
+        // The glow scan starts over after the probe
+        if (glow_cell >= 0) finder.stop();
+        glow_cell = -1;
+        glow_done = false;
+        where_minibrot = false;
+        where_probing = true;
+        finder.probe(state.center, 2.0 / state.zoom_factor);
+        state.needs_redraw = true;
+        return true;
+    }
+    while (finder.work(256)) {
+        if (static_cast<int32_t>(until - now_ms()) <= 0) return true;
+    }
+    where_probing = false;
+    where_done = true;
+    if (finder.found()) {
+        const MinibrotFinder::Result& r = finder.result();
+        where_minibrot = true;
+        where_period = r.period;
+        where_minibrot_zoom = r.zoom();
+        const double dx = (r.nucleus.real - state.center.real).to_double();
+        const double dy = (r.nucleus.imag - state.center.imag).to_double();
+        where_minibrot_px = static_cast<float>(std::sqrt(dx * dx + dy * dy) / glow_pixel());
+    }
+    state.needs_redraw = true;
+    return true;
+}
+
+const char* ordinal_suffix(int n) {
+    if (n % 100 >= 11 && n % 100 <= 13) return "th";
+    return n % 10 == 1 ? "st" : n % 10 == 2 ? "nd" : n % 10 == 3 ? "rd" : "th";
+}
+
+// "main cardioid > 1/3 > 1/2": the chain of bulbs from the cardioid out, ... where it's incomplete
+int bulb_path(char* out, int size) {
+    int n;
+    if (!namer.named())
+        n = snprintf(out, size, "...");
+    else if (namer.base_period() == 1)
+        n = snprintf(out, size, "main cardioid");
+    else
+        n = snprintf(out, size, "minibrot p%d", namer.base_period());
+    for (int i = namer.depth() - 1; i >= 0 && n >= 0 && n < size; --i) {
+        n += snprintf(out + n, size - n, " > %d/%d", namer.bulb(i).m, namer.bulb(i).k);
+    }
+    return n;
+}
+
+// The center is in the set: the name of its bulb, once known
+int inside_text(char* out, int size) {
+    const int period = namer.period() ? namer.period() : where_cycle;
+    if (namer.busy() || (!namer.named() && namer.depth() == 0)) {
+        if (period) return snprintf(out, size, "Here: inside, cycle of %d", period);
+        return snprintf(out, size, "Here: no escape in %d", where_limit);
+    }
+    const int depth = namer.depth();
+    if (depth == 0) {
+        if (namer.base_period() == 1) return snprintf(out, size, "Here: in the main cardioid");
+        return snprintf(out, size, "Here: in minibrot p%d", namer.base_period());
+    }
+    if (depth == 1 && namer.named()) {
+        const BulbNamer::Bulb& b = namer.bulb(0);
+        if (namer.base_period() == 1)
+            return snprintf(out, size, "Here: %d/%d bulb of the main cardioid, p%d", b.m, b.k, period);
+        return snprintf(out, size, "Here: %d/%d bulb of minibrot p%d, p%d", b.m, b.k, namer.base_period(), period);
+    }
+    int n = namer.named() ? snprintf(out, size, "Here: %d%s order bulb, period %d", depth, ordinal_suffix(depth), period)
+                          : snprintf(out, size, "Here: inside, period %d", period);
+    if (n < 0 || n >= size) return n;
+    n += snprintf(out + n, size - n, "\nPath: ");
+    if (n >= size) return n;
+    return n + bulb_path(out + n, size - n);
+}
+
+// The lines for the info overlay, empty while it's not known yet
+void where_text(char* out, int size) {
+    out[0] = 0;
+    if (!where_ready || state.calculation_id != where_calculation) return;
+    int n;
+    if (where_escape && where_distance >= 1.0f)
+        n = snprintf(out, size, "Here: outside, %.0f px from the set", where_distance);
+    else if (where_escape)
+        n = snprintf(out, size, "Here: on the edge, escapes at %d", where_escape);
+    else
+        n = inside_text(out, size);
+    // Period 1 is the main set itself
+    if (n < 0 || n >= size || !where_done || !where_minibrot || where_period < 2) return;
+    char zoom[16];
+    format_deep_zoom(zoom, sizeof(zoom), where_minibrot_zoom);
+    if (where_minibrot_px < 1.0f)
+        snprintf(out + n, size - n, "\nOn minibrot p%d, fills screen at %s", where_period, zoom);
+    else
+        snprintf(out + n, size - n, "\nMinibrot p%d %.0f px off, fills at %s", where_period, where_minibrot_px, zoom);
+}
+
 // ---- Menu rows ----
 
 constexpr Color LIGHT_TEXT = {225, 226, 235};
@@ -1843,6 +2037,14 @@ void render_overlay(PicoGraphics& g, uint32_t now) {
         add_text(g, target_text, Point(margin, info_y));
     }
 
+    char where[sizeof(OverlayText::text)];
+    where_text(where, sizeof(where));
+    if (where[0]) {
+        info_y += font8_height + margin;
+        add_text(g, where, Point(margin, info_y));
+        for (const char* c = where; *c; ++c) info_y += *c == '\n' ? font8_height : 0;
+    }
+
     if (state.auto_zoom) {
         info_y += font8_height + margin;
         char auto_zoom_text[40];
@@ -2037,7 +2239,7 @@ bool update(uint32_t now, uint32_t elapsed_ms) {
 }
 
 bool work(bool (*interrupt)()) {
-    if (!user_search()) return julia_work() || glow_work(interrupt);
+    if (!user_search()) return julia_work() || where_work() || glow_work(interrupt);
     const uint32_t until = now_ms() + CORE0_WORK_MS;
     while (finder.busy() && static_cast<int32_t>(until - now_ms()) > 0 && !(interrupt && interrupt())) {
         finder.work(256);

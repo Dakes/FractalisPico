@@ -338,6 +338,7 @@ void push_event(ui::Input input, int button) {
  *   A: a tap opens the menu. While A is held, B, X and Y have their quick functions: B resets the view, X the next
  *      palette, Y auto zoom on/off.
  *   B, X, Y: a tap pans left/right or zooms in, a long press pans down/up or zooms out and repeats while held.
+ *      Tap and then hold (hidden): the tap repeats while held.
  * In the menu: X up, Y down (both repeat while held), A OK (held: the second function of a row, e.g. storing a
  * view), B back (held: closes the menu).
  */
@@ -350,6 +351,8 @@ bool sample_buttons(repeating_timer_t*) {
         uint8_t debounce;
         uint32_t pressed_at;
         uint32_t last_repeat;
+        bool tap_hold;     // pressed right after a tap: held, it repeats the tap
+        uint32_t tap_at;   // when the last tap was released, 0 = the last release wasn't a tap
     };
     static ButtonTracker trackers[4] = {};
     static Button* const buttons[4] = {&button_a, &button_b, &button_x, &button_y};
@@ -369,7 +372,8 @@ bool sample_buttons(repeating_timer_t*) {
         if (raw && !b.down) {
             const bool menu = ui::menu_active;
             const bool shifted = !menu && i != 0 && trackers[0].down && !trackers[0].menu;
-            b = {true, false, menu, shifted, 0, now, now};
+            const bool tap_hold = !menu && !shifted && i != 0 && b.tap_at != 0 && now - b.tap_at < TAP_HOLD_MS;
+            b = {true, false, menu, shifted, 0, now, now, tap_hold, 0};
             if (i == 0) {
                 a_used = false;
             } else if (shifted) {
@@ -398,10 +402,10 @@ bool sample_buttons(repeating_timer_t*) {
             } else if (!b.long_fired && held >= LONG_PRESS_MS) {
                 b.long_fired = true;
                 b.last_repeat = now;
-                push_event(ui::Input::LONG, i);
+                push_event(b.tap_hold ? ui::Input::PRESS : ui::Input::LONG, i);
             } else if (b.long_fired && now - b.last_repeat >= REPEAT_MS) {
                 b.last_repeat = now;
-                push_event(ui::Input::REPEAT, i);
+                push_event(b.tap_hold ? ui::Input::PRESS : ui::Input::REPEAT, i);
             }
         } else if (b.down) {
             b.down = false;
@@ -415,6 +419,7 @@ bool sample_buttons(repeating_timer_t*) {
                 }
             } else if (!b.long_fired && !b.shifted) {
                 push_event(ui::Input::PRESS, i);
+                b.tap_at = now;
             }
         }
     }
