@@ -39,12 +39,90 @@ constexpr ColorStop NEON[] = {
     {0.85f,   0, 200, 255},
 };
 
+constexpr ColorStop PASTEL[] = {
+    {0.00f, 250, 190, 210},
+    {0.18f, 255, 214, 170},
+    {0.36f, 250, 245, 175},
+    {0.54f, 180, 235, 200},
+    {0.72f, 170, 210, 250},
+    {0.88f, 210, 185, 245},
+};
+
+constexpr ColorStop LIME[] = {
+    {0.00f,   5,  25,   5},
+    {0.35f,  60, 160,  20},
+    {0.60f, 190, 255,  40},
+    {0.75f, 245, 255, 190},
+};
+
+// Two colors only
+constexpr ColorStop LIME_PURPLE[] = {
+    {0.00f,  70,   0, 110},
+    {0.50f, 180, 255,  30},
+};
+
+constexpr ColorStop ICE[] = {
+    {0.00f,   0,  15,  50},
+    {0.40f,  40, 170, 230},
+    {0.70f, 235, 250, 255},
+};
+
+constexpr ColorStop GOLD[] = {
+    {0.00f,  35,  15,   0},
+    {0.45f, 230, 160,  20},
+    {0.70f, 255, 240, 180},
+};
+
+constexpr ColorStop SILVER[] = {
+    {0.00f,  10,  10,  12},
+    {0.50f, 235, 235, 240},
+};
+
+constexpr ColorStop MAGMA[] = {
+    {0.00f,   0,   0,   5},
+    {0.20f,  60,  15, 110},
+    {0.40f, 180,  50, 120},
+    {0.60f, 250, 120,  80},
+    {0.78f, 252, 250, 190},
+};
+
+constexpr ColorStop SUNSET[] = {
+    {0.00f,  30,  10,  70},
+    {0.25f, 150,  30, 120},
+    {0.50f, 250,  90,  70},
+    {0.72f, 255, 200,  90},
+};
+
+constexpr ColorStop AURORA[] = {
+    {0.00f,   0,  10,  30},
+    {0.30f,  20, 200, 120},
+    {0.55f, 120, 255, 200},
+    {0.75f, 140,  60, 200},
+};
+
+constexpr ColorStop SEPIA[] = {
+    {0.00f,  25,  15,   5},
+    {0.45f, 160, 110,  60},
+    {0.70f, 245, 225, 190},
+};
+
+// New palettes go to the end: settings and view slots store the index
 constexpr Definition PALETTES[] = {
     {"Classic", nullptr, 0, 1.0f, START_HUE},  // the original HSV rainbow
     {"Ultra", ULTRA, sizeof(ULTRA) / sizeof(ULTRA[0]), 1.0f, 0.0f},
     {"Fire", FIRE, sizeof(FIRE) / sizeof(FIRE[0]), 1.0f, 0.0f},
     {"Ocean", OCEAN, sizeof(OCEAN) / sizeof(OCEAN[0]), 1.0f, 0.0f},
     {"Neon", NEON, sizeof(NEON) / sizeof(NEON[0]), 1.0f, 0.0f},
+    {"Pastel", PASTEL, sizeof(PASTEL) / sizeof(PASTEL[0]), 1.0f, 0.0f},
+    {"Lime", LIME, sizeof(LIME) / sizeof(LIME[0]), 1.0f, 0.0f},
+    {"Lime Purple", LIME_PURPLE, sizeof(LIME_PURPLE) / sizeof(LIME_PURPLE[0]), 1.0f, 0.0f},
+    {"Ice", ICE, sizeof(ICE) / sizeof(ICE[0]), 1.0f, 0.0f},
+    {"Gold", GOLD, sizeof(GOLD) / sizeof(GOLD[0]), 1.0f, 0.0f},
+    {"Silver", SILVER, sizeof(SILVER) / sizeof(SILVER[0]), 1.0f, 0.0f},
+    {"Magma", MAGMA, sizeof(MAGMA) / sizeof(MAGMA[0]), 1.0f, 0.0f},
+    {"Sunset", SUNSET, sizeof(SUNSET) / sizeof(SUNSET[0]), 1.0f, 0.0f},
+    {"Aurora", AURORA, sizeof(AURORA) / sizeof(AURORA[0]), 1.0f, 0.0f},
+    {"Sepia", SEPIA, sizeof(SEPIA) / sizeof(SEPIA[0]), 1.0f, 0.0f},
 };
 constexpr int PALETTE_COUNT = sizeof(PALETTES) / sizeof(PALETTES[0]);
 
