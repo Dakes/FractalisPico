@@ -873,6 +873,137 @@ const menu::Icon ICON_BARS = {{
     "................",
 }};
 
+// ---- Orbit viewer ----
+
+/**
+ * The orbit of the center point, z1, z2, z3 ..., in a small inset of the plane around 0 (the circle |z| = 2 marked).
+ * Calculated in fixed point once per view, so it is right at any depth, and drawn into an alpha mask: anti-aliased
+ * lines between the points, the points brighter, both fading along the orbit.
+ */
+constexpr int ORBIT_SIZE = 80;              // pixels, square
+constexpr float ORBIT_RANGE = 2.3f;         // |re|, |im| up to this fit in
+constexpr int ORBIT_ITERATIONS = 500;       // drawn
+// Iterated further, up to the view's iteration limit, to find out if it escapes or where it settles
+constexpr int ORBIT_MAX_ITERATIONS = 20000;
+constexpr int ORBIT_HISTORY = 128;          // the longest cycle that gets named
+bool orbit_on = false;
+uint8_t orbit_mask[ORBIT_SIZE * ORBIT_SIZE / 2];  // 4 bits per pixel, see menu::mask()
+Coordinate orbit_center;
+bool orbit_ready = false;
+int orbit_cycle = 0;    // length of the cycle the orbit settles into, 0 = none found
+int orbit_limit = 0;    // iterations done without escaping
+int orbit_escape = 0;   // the iteration it escaped at, 0 = it didn't
+
+float orbit_x(float re) { return (re / ORBIT_RANGE * 0.5f + 0.5f) * ORBIT_SIZE; }
+float orbit_y(float im) { return (0.5f - im / ORBIT_RANGE * 0.5f) * ORBIT_SIZE; }
+
+// Adds a point with bilinear weights, the brightest drawing of a pixel wins
+void orbit_splat(float x, float y, int alpha) {
+    x -= 0.5f;
+    y -= 0.5f;
+    const int ix = static_cast<int>(std::floor(x)), iy = static_cast<int>(std::floor(y));
+    const float fx = x - ix, fy = y - iy;
+    for (int j = 0; j < 2; ++j) {
+        for (int i = 0; i < 2; ++i) {
+            const int px = ix + i, py = iy + j;
+            if (px < 0 || py < 0 || px >= ORBIT_SIZE || py >= ORBIT_SIZE) continue;
+            const float w = (i ? fx : 1 - fx) * (j ? fy : 1 - fy);
+            // A bit more than the weight: a line of splats half a pixel apart is about as bright as alpha
+            const int a = std::min(15, static_cast<int>(alpha * w * (1.6f / 17.0f) + 0.5f));
+            const int index = py * ORBIT_SIZE + px, shift = 4 * (index & 1);
+            uint8_t& m = orbit_mask[index / 2];
+            if (a > ((m >> shift) & 15)) m = static_cast<uint8_t>((m & ~(15 << shift)) | (a << shift));
+        }
+    }
+}
+
+void orbit_line(float x0, float y0, float x1, float y1, int alpha) {
+    const float length = std::hypot(x1 - x0, y1 - y0);
+    const int steps = std::min(400, static_cast<int>(length * 2.0f) + 1);
+    for (int k = 0; k <= steps; ++k) {
+        const float t = static_cast<float>(k) / steps;
+        orbit_splat(x0 + (x1 - x0) * t, y0 + (y1 - y0) * t, alpha);
+    }
+}
+
+void orbit_dot(float x, float y, int alpha) {
+    orbit_splat(x, y, alpha);
+    for (int k = 0; k < 4; ++k) {
+        orbit_splat(x + (k == 0 ? 0.8f : k == 1 ? -0.8f : 0.0f), y + (k == 2 ? 0.8f : k == 3 ? -0.8f : 0.0f),
+                    alpha * 2 / 3);
+    }
+}
+
+void calculate_orbit() {
+    orbit_center = state.center;
+    orbit_ready = true;
+    orbit_cycle = orbit_escape = 0;
+    orbit_limit = std::max(ORBIT_ITERATIONS, std::min(static_cast<int>(state.iteration_limit), ORBIT_MAX_ITERATIONS));
+    memset(orbit_mask, 0, sizeof(orbit_mask));
+    std::complex<float> history[ORBIT_HISTORY];
+    Fixed zr(0.0), zi(0.0);
+    float last_x = orbit_x(0.0f), last_y = orbit_y(0.0f);
+    for (int n = 1; n <= orbit_limit; ++n) {
+        const Fixed zr2 = zr * zr, zi2 = zi * zi;
+        zi = (zr * zi).twice() + state.center.imag;
+        zr = zr2 - zi2 + state.center.real;
+        const float re = static_cast<float>(zr.to_double()), im = static_cast<float>(zi.to_double());
+        history[n % ORBIT_HISTORY] = {re, im};
+        if (n <= ORBIT_ITERATIONS) {
+            // Older points fade, so the start and where it settles can be told apart
+            const int alpha = 255 - 170 * n / ORBIT_ITERATIONS;
+            const float x = orbit_x(re), y = orbit_y(im);
+            orbit_line(last_x, last_y, x, y, alpha / 2);
+            orbit_dot(x, y, alpha);
+            last_x = x;
+            last_y = y;
+        }
+        if (re * re + im * im > 4.0f) {
+            orbit_escape = n;
+            return;
+        }
+    }
+    // The shortest k with z_n-k = z_n: the cycle. Near the edge of a bulb the orbit only creeps towards it, so the
+    // points count as the same within a thousandth.
+    const std::complex<float> last = history[orbit_limit % ORBIT_HISTORY];
+    for (int k = 1; k < ORBIT_HISTORY; ++k) {
+        if (std::abs(history[(orbit_limit - k) % ORBIT_HISTORY] - last) < 1e-3f) {
+            orbit_cycle = k;
+            break;
+        }
+    }
+}
+
+bool orbit_shown() {
+    return orbit_on && !menu::is_open();
+}
+
+void draw_orbit() {
+    if (!orbit_ready) return;
+    const int x = SCREEN_W - ORBIT_SIZE - 10, y = SCREEN_H - ORBIT_SIZE - 26;
+    const Box box = {x - 4, y - 14, ORBIT_SIZE + 8, ORBIT_SIZE + 18};
+    if (!menu::visible(box)) return;
+    menu::set_clip({0, 0, SCREEN_W, SCREEN_H});
+    menu::round_rect(box, 6, {14, 14, 26}, 205);
+    // Axes and |z| = 2
+    const float cx = x + orbit_x(0.0f), cy = y + orbit_y(0.0f);
+    menu::blend({x, static_cast<int>(cy), ORBIT_SIZE, 1}, {200, 200, 220}, 50);
+    menu::blend({static_cast<int>(cx), y, 1, ORBIT_SIZE}, {200, 200, 220}, 50);
+    menu::ring(cx, cy, 2.0f / ORBIT_RANGE * 0.5f * ORBIT_SIZE, 1.0f, {200, 200, 220}, 110);
+    menu::mask(x, y, ORBIT_SIZE, ORBIT_SIZE, orbit_mask, {255, 225, 120});
+    char text[24];
+    if (orbit_escape)
+        snprintf(text, sizeof(text), "escapes at %d", orbit_escape);
+    else if (orbit_cycle)
+        snprintf(text, sizeof(text), "cycle of %d", orbit_cycle);
+    else
+        snprintf(text, sizeof(text), "no escape in %d", orbit_limit);
+    menu::text(text, x, box.y + 4, {225, 226, 235}, true);
+}
+
+int orbit_get(int) { return orbit_on; }
+void orbit_set(int, int v) { orbit_on = v != 0; }
+
 // ---- Menu rows ----
 
 constexpr Color LIGHT_TEXT = {225, 226, 235};
@@ -1290,6 +1421,7 @@ constexpr menu::Page VIEWS_PAGE = {"Views", &ICON_BOOKMARK, VIEWS_COLOR, VIEWS_I
 constexpr menu::Item SYSTEM_ITEMS[] = {
     menu::choice("Info overlay", hud_get, hud_set, hud_count, hud_text,
                  "Coordinates and zoom. Auto: 5 s after a press").live(),
+    menu::toggle("Orbit viewer", orbit_get, orbit_set, "The orbit of the center point, in a corner"),
     menu::action("Save settings now", save_settings_now, "Otherwise saved 5 min after the last press"),
     menu::page("Statistics", STATS_PAGE, "Time and work of the current view"),
 };
@@ -1670,7 +1802,7 @@ bool searching() {
 
 bool overlay_wanted() {
     const uint32_t now = now_ms();
-    return menu::is_open() || quick_shown || hud_visible(now) || toast_active(now);
+    return menu::is_open() || quick_shown || hud_visible(now) || toast_active(now) || orbit_shown();
 }
 
 void led_color(uint8_t& r, uint8_t& g, uint8_t& b) {
@@ -1695,6 +1827,9 @@ void prepare_frame(PicoGraphics& g) {
     overlay_text_count = 0;
     shown = {overlay_wanted(), hud_visible(now), quick_shown, toast_active(now),
              autoZoom.seconds_to_next_step(now)};
+    if (orbit_shown() && (!orbit_ready || memcmp(&orbit_center, &state.center, sizeof(Coordinate)) != 0)) {
+        calculate_orbit();
+    }
     if (menu::is_open()) {
         stats = fractalis.view_stats();
         menu::prepare(g);
@@ -1708,6 +1843,7 @@ void draw_strip(PicoGraphics& g, uint16_t* strip, int first_row, int rows) {
     draw_overlay_texts(g, first_row, rows);
     menu::begin_strip(g, strip, first_row, rows);
     menu::draw();
+    if (orbit_shown()) draw_orbit();
     if (shown.toast) {
         menu::set_clip({0, 0, SCREEN_W, SCREEN_H});
         draw_toast();

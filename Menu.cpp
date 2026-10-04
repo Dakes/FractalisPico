@@ -524,6 +524,23 @@ void blend(const Box& box, Color c, int alpha) {
     }
 }
 
+void mask(int x, int y, int width, int height, const uint8_t* alpha, Color c) {
+    int from, to;
+    if (!clip_rows(y, y + height, from, to)) return;
+    const int x0 = std::max(x, target.clip.x);
+    const int x1 = std::min(x + width, target.clip.x + target.clip.w);
+    const uint16_t c565 = pack(c);
+    for (int row = from; row < to; ++row) {
+        const uint8_t* line = alpha + (row - y) * (width / 2);
+        uint16_t* p = pixel(x0, row);
+        for (int col = x0; col < x1; ++col, ++p) {
+            const int i = col - x;
+            const int a = (line[i / 2] >> (4 * (i & 1))) & 15;
+            if (a) blend_pixel(p, c565, a * 17 + 1);
+        }
+    }
+}
+
 void round_rect(const Box& box, int radius, Color c, int alpha) {
     int from, to;
     if (!clip_rows(box.y, box.y + box.h, from, to)) return;

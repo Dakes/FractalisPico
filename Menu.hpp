@@ -188,6 +188,9 @@ void round_rect(const Box& box, int radius, Color c, int alpha = 256);
 void disc(float cx, float cy, float radius, Color c, int alpha = 256);
 void ring(float cx, float cy, float radius, float width, Color c, int alpha = 256);
 void icon(const Icon& icon, int x, int y, Color c);
+// One color through a mask of width x height alpha values, 4 bits each (0-15, the low half of a byte first), row
+// by row. width must be even.
+void mask(int x, int y, int width, int height, const uint8_t* alpha, Color c);
 // Pixels in display byte order, width x height, row by row
 void image(const uint16_t* pixels, int x, int y, int width, int height);
 // One color per column (RGB565, native byte order), stretched over the box height
