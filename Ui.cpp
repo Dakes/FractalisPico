@@ -891,8 +891,15 @@ constexpr int ORBIT_ITERATIONS = 500;       // drawn
 // Iterated further, up to the view's iteration limit, to find out if it escapes or where it settles
 constexpr int ORBIT_MAX_ITERATIONS = 20000;
 constexpr int ORBIT_HISTORY = 128;          // the longest cycle that gets named
-bool orbit_on = false;
-uint8_t orbit_mask[ORBIT_SIZE * ORBIT_SIZE / 2];  // 4 bits per pixel, see menu::mask()
+// The corner inset: the orbit viewer or the Julia inset, they share the corner and the memory
+enum Inset { INSET_OFF, INSET_ORBIT, INSET_JULIA, INSET_COUNT };
+const char* const INSET_NAMES[] = {"off", "orbit", "Julia"};
+static_assert(sizeof(INSET_NAMES) / sizeof(INSET_NAMES[0]) == INSET_COUNT, "a name for every inset");
+int inset = INSET_OFF;
+constexpr int JULIA_W = 80, JULIA_H = 60;
+uint8_t inset_buffer[JULIA_W * JULIA_H];
+static_assert(sizeof(inset_buffer) >= ORBIT_SIZE * ORBIT_SIZE / 2, "room for the orbit");
+uint8_t* const orbit_mask = inset_buffer;  // 4 bits per pixel, see menu::mask()
 Coordinate orbit_center;
 bool orbit_ready = false;
 int orbit_cycle = 0;    // length of the cycle the orbit settles into, 0 = none found
@@ -944,7 +951,7 @@ void calculate_orbit() {
     orbit_ready = true;
     orbit_cycle = orbit_escape = 0;
     orbit_limit = std::max(ORBIT_ITERATIONS, std::min(static_cast<int>(state.iteration_limit), ORBIT_MAX_ITERATIONS));
-    memset(orbit_mask, 0, sizeof(orbit_mask));
+    memset(orbit_mask, 0, ORBIT_SIZE * ORBIT_SIZE / 2);
     std::complex<float> history[ORBIT_HISTORY];
     Fixed zr(0.0), zi(0.0);
     float last_x = orbit_x(0.0f), last_y = orbit_y(0.0f);
@@ -980,7 +987,7 @@ void calculate_orbit() {
 }
 
 bool orbit_shown() {
-    return orbit_on && !menu::is_open();
+    return inset == INSET_ORBIT && !menu::is_open();
 }
 
 void draw_orbit() {
@@ -1006,8 +1013,106 @@ void draw_orbit() {
     menu::text(text, x, box.y + 4, {225, 226, 235}, true);
 }
 
-int orbit_get(int) { return orbit_on; }
-void orbit_set(int, int v) { orbit_on = v != 0; }
+// ---- Julia inset ----
+
+/**
+ * The Julia set of the center point, in the corner: z -> z^2 + c with c = the center and z starting at each pixel.
+ * Near a minibrot it shows the shape the minibrot's surroundings repeat. Float is enough, deep views barely move c.
+ * Calculated by core0 in slices of rows (see work()), one byte per pixel: 0 = in the set, else the color.
+ */
+constexpr float JULIA_RANGE = 1.6f;  // |re| up to this fits in, the height to scale
+constexpr int JULIA_ITERATIONS = 256;
+Coordinate julia_center;
+bool julia_valid = false;   // the buffer holds the Julia set (or part of it) of julia_center
+int julia_row = JULIA_H;    // next row to calculate, JULIA_H = done
+int julia_palette = -1;
+uint16_t julia_colors[256];  // display byte order
+
+void julia_begin() {
+    if (!julia_valid) memset(inset_buffer, 0, sizeof(inset_buffer));
+    julia_center = state.center;
+    julia_valid = true;
+    julia_row = 0;
+}
+
+void julia_rows(int rows) {
+    const float cr = static_cast<float>(julia_center.real.to_double());
+    const float ci = static_cast<float>(julia_center.imag.to_double());
+    const float step = 2.0f * JULIA_RANGE / JULIA_W;
+    for (const int end = std::min(JULIA_H, julia_row + rows); julia_row < end; ++julia_row) {
+        const float im = (julia_row + 0.5f - JULIA_H * 0.5f) * step;  // down, like the image
+        for (int x = 0; x < JULIA_W; ++x) {
+            float zr = (x + 0.5f - JULIA_W * 0.5f) * step, zi = im;
+            float zr2 = zr * zr, zi2 = zi * zi;
+            int n = 0;
+            while (n < JULIA_ITERATIONS && zr2 + zi2 < 256.0f) {
+                zi = 2.0f * zr * zi + ci;
+                zr = zr2 - zi2 + cr;
+                zr2 = zr * zr;
+                zi2 = zi * zi;
+                n++;
+            }
+            uint8_t value = 0;
+            if (n < JULIA_ITERATIONS) {
+                // Smooth iteration count, log scale like the main image: a palette cycle every few doublings
+                const float smooth = n + 1 - std::log2(std::log2(zr2 + zi2) * 0.5f);
+                const float t = std::log2(1.0f + std::max(smooth, 0.0f)) * 0.25f;
+                value = static_cast<uint8_t>(1 + static_cast<int>((t - std::floor(t)) * 254.99f));
+            }
+            inset_buffer[julia_row * JULIA_W + x] = value;
+        }
+    }
+}
+
+bool julia_shown() {
+    return inset == INSET_JULIA && !menu::is_open() && julia_valid;
+}
+
+// Core0 work: the next rows. Returns false when there's nothing to do.
+bool julia_work() {
+    if (inset != INSET_JULIA) return false;
+    if (!julia_valid || (julia_row >= JULIA_H && memcmp(&julia_center, &state.center, sizeof(Coordinate)) != 0)) {
+        julia_begin();
+    }
+    if (julia_row >= JULIA_H) return false;
+    julia_rows(6);
+    if (julia_row >= JULIA_H) state.needs_redraw = true;
+    return true;
+}
+
+void draw_julia() {
+    const int x = SCREEN_W - JULIA_W - 10, y = SCREEN_H - JULIA_H - 26;
+    const Box box = {x - 4, y - 14, JULIA_W + 8, JULIA_H + 18};
+    if (!menu::visible(box)) return;
+    if (julia_palette != color_palette.index()) {
+        julia_palette = color_palette.index();
+        julia_colors[0] = 0;
+        for (int i = 1; i < 256; ++i) {
+            const uint16_t c = palette::sample(julia_palette, (i - 1) / 255.0f);
+            julia_colors[i] = static_cast<uint16_t>((c >> 8) | (c << 8));
+        }
+    }
+    menu::set_clip({0, 0, SCREEN_W, SCREEN_H});
+    menu::round_rect(box, 6, {14, 14, 26}, 205);
+    uint16_t line[JULIA_W];
+    for (int row = 0; row < JULIA_H; ++row) {
+        if (!menu::visible({x, y + row, JULIA_W, 1})) continue;
+        const uint8_t* values = inset_buffer + row * JULIA_W;
+        for (int i = 0; i < JULIA_W; ++i) line[i] = julia_colors[values[i]];
+        menu::image(line, x, y + row, JULIA_W, 1);
+    }
+    menu::text("Julia set", x, box.y + 4, {225, 226, 235}, true);
+}
+
+int inset_get(int) { return inset; }
+void inset_set(int, int v) {
+    inset = v;
+    orbit_ready = false;
+    julia_valid = false;
+}
+int inset_count(int) { return INSET_COUNT; }
+const char* inset_text(int, int option, char*, int) { return INSET_NAMES[option]; }
+
 
 // ---- Minibrot glow ----
 
@@ -1543,7 +1648,8 @@ constexpr menu::Page VIEWS_PAGE = {"Views", &ICON_BOOKMARK, VIEWS_COLOR, VIEWS_I
 constexpr menu::Item SYSTEM_ITEMS[] = {
     menu::choice("Info overlay", hud_get, hud_set, hud_count, hud_text,
                  "Coordinates and zoom. Auto: 5 s after a press").live(),
-    menu::toggle("Orbit viewer", orbit_get, orbit_set, "The orbit of the center point, in a corner"),
+    menu::choice("Corner inset", inset_get, inset_set, inset_count, inset_text,
+                 "The orbit of the center point, or the Julia set of it, in a corner"),
     menu::action("Save settings now", save_settings_now, "Otherwise saved 5 min after the last press"),
     menu::page("Statistics", STATS_PAGE, "Time and work of the current view"),
 };
@@ -1909,7 +2015,7 @@ bool update(uint32_t now, uint32_t elapsed_ms) {
 }
 
 bool work(bool (*interrupt)()) {
-    if (!user_search()) return glow_work(interrupt);
+    if (!user_search()) return julia_work() || glow_work(interrupt);
     const uint32_t until = now_ms() + CORE0_WORK_MS;
     while (finder.busy() && static_cast<int32_t>(until - now_ms()) > 0 && !(interrupt && interrupt())) {
         finder.work(256);
@@ -1924,7 +2030,7 @@ bool searching() {
 
 bool overlay_wanted() {
     const uint32_t now = now_ms();
-    return menu::is_open() || quick_shown || hud_visible(now) || toast_active(now) || orbit_shown()
+    return menu::is_open() || quick_shown || hud_visible(now) || toast_active(now) || orbit_shown() || julia_shown()
         || glow_shown();
 }
 
@@ -1968,6 +2074,7 @@ void draw_strip(PicoGraphics& g, uint16_t* strip, int first_row, int rows) {
     if (glow_shown()) draw_glow();
     menu::draw();
     if (orbit_shown()) draw_orbit();
+    if (julia_shown()) draw_julia();
     if (shown.toast) {
         menu::set_clip({0, 0, SCREEN_W, SCREEN_H});
         draw_toast();
