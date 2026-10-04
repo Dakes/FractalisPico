@@ -38,6 +38,11 @@ public:
      * size.
      */
     void start(const Coordinate* starts, int count, double target);
+    /**
+     * Only the ball method and Newton's method, for the disc of radius r around c: the biggest minibrot in it, any
+     * size. found() tells if there is one.
+     */
+    void probe(const Coordinate& c, double r);
     void stop() { phase = IDLE; }
     bool busy() const { return phase != IDLE; }
     // Works for about this many iterations (in fixed point, a few microseconds each). Returns true while busy.
@@ -57,6 +62,8 @@ private:
     Coordinate starts[MAX_STARTS];
     int start_count = 0;
     int start_index = 0;
+    bool single = false;  // probe()
+    uint32_t max_iterations = 0;
 
     // z_n+1 = z_n^2 + c in fixed point, z and dz/dc as double
     struct Orbit {

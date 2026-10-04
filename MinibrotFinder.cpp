@@ -16,6 +16,8 @@ constexpr int MAX_NEWTON_STEPS = 40;
 constexpr int MAX_PROBES_PER_START = 8;
 // The whole search, about 10 s
 constexpr uint32_t MAX_ITERATIONS = 1'200'000;
+// A single probe
+constexpr uint32_t MAX_PROBE_ITERATIONS = 100'000;
 // The biggest minibrot in a disc of radius r on the edge of the set is about r^2 / 16 big
 constexpr double SIZE_PER_RADIUS_SQ = 1.0 / 16;
 // The walk gets this much closer to the set than the radius of the disc
@@ -57,11 +59,25 @@ void MinibrotFinder::start(const Coordinate* points, int count, double target) {
     start_count = std::min(count, MAX_STARTS);
     for (int i = 0; i < start_count; ++i) starts[i] = points[i];
     target_zoom = target;
+    single = false;
+    max_iterations = MAX_ITERATIONS;
     best_error = INFINITY;
     total_iterations = 0;
     probe_count = 0;
     start_index = -1;
     next_start();
+}
+
+void MinibrotFinder::probe(const Coordinate& c, double r) {
+    single = true;
+    max_iterations = MAX_PROBE_ITERATIONS;
+    best_error = INFINITY;
+    total_iterations = 0;
+    probe_count = 1;
+    point = c;
+    radius = r;
+    orbit.begin(point);
+    phase = BALL;
 }
 
 void MinibrotFinder::next_start() {
@@ -85,7 +101,7 @@ void MinibrotFinder::next_start() {
 
 bool MinibrotFinder::work(int iterations) {
     for (int i = 0; i < iterations && phase != IDLE; ++i) {
-        if (++total_iterations > MAX_ITERATIONS) {
+        if (++total_iterations > max_iterations) {
             phase = IDLE;
             break;
         }
@@ -265,6 +281,12 @@ void MinibrotFinder::finish_probe(double zoom) {
         next_radius(radius * 0.4);
         return;
     }
+    if (single) {
+        best = {newton_c, period, b * l * l};
+        best_error = 0;
+        phase = IDLE;
+        return;
+    }
     const double error = std::log10(zoom / target_zoom);
     if (zoom <= PRECISION_MAX_ZOOM && std::abs(error) < best_error) {
         best = {newton_c, period, b * l * l};
@@ -284,6 +306,10 @@ void MinibrotFinder::finish_probe(double zoom) {
 }
 
 void MinibrotFinder::next_radius(double proposed) {
+    if (single) {
+        phase = IDLE;
+        return;
+    }
     // A bigger disc has a bigger minibrot. Between a radius that was too small and one that was too big, the next
     // one is in the middle (log scale), once the guess doesn't help.
     if (deep_radius > 0 && shallow_radius < INFINITY) {

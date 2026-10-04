@@ -190,6 +190,12 @@ MinibrotFinder finder;
 uint32_t search_started_ms = 0;
 uint32_t search_seconds = 0;  // shown in the message
 int target_period = 0;        // of the minibrot auto zoom dives to
+int glow_cell = -1;           // the minibrot glow uses the finder too: the cell it probes, -1 = none
+
+// A search started from the menu, not the glow
+bool user_search() {
+    return finder.busy() && glow_cell < 0;
+}
 
 // The menu offers x1e10 to x1e70
 constexpr int FINDER_DEPTHS = 7;
@@ -246,6 +252,7 @@ void find_minibrot(int depth) {
         show_led_feedback(255, 0, 0, 300);
         return;
     }
+    glow_cell = -1;  // the glow scan starts over after it
     finder.start(starts, count, finder_depth(depth));
     search_started_ms = now_ms();
     search_seconds = 0;
@@ -1002,6 +1009,140 @@ void draw_orbit() {
 int orbit_get(int) { return orbit_on; }
 void orbit_set(int, int v) { orbit_on = v != 0; }
 
+// ---- Minibrot glow ----
+
+/**
+ * A soft halo over minibrots too small to see. Once a view is done, core0 probes a grid of cells: the ball method
+ * finds the biggest minibrot in the disc around each (see MinibrotFinder::probe()). The ones smaller than a few
+ * pixels glow, bigger ones are visible anyway. Shares the finder with the minibrot search, which goes first.
+ */
+constexpr int GLOW_CELL = 20;                       // pixels, square
+constexpr int GLOW_COLUMNS = SCREEN_W / GLOW_CELL;  // 16
+constexpr int GLOW_ROWS = SCREEN_H / GLOW_CELL;     // 12
+constexpr int GLOW_MAX = 64;                        // the biggest ones
+constexpr float GLOW_VISIBLE_PX = 32.0f;            // bigger minibrots are easy to see, they don't glow
+constexpr Color GLOW_COLOR = {170, 235, 255};
+struct GlowSpot {
+    float x, y;  // on screen
+    float px;    // size of the minibrot in pixels
+};
+bool glow_on = false;
+GlowSpot glow_spots[GLOW_MAX];
+int glow_count = 0;
+uint32_t glow_calculation = 0;  // the view scanned (or being scanned)
+bool glow_done = false;
+
+// Width of a pixel in the complex plane, like search_starts()
+double glow_pixel() { return 4.0 / state.zoom_factor / state.screen_w; }
+
+// The complex coordinate of a point on screen (pixel centers at .5)
+Coordinate glow_point(float x, float y) {
+    Coordinate c = state.center;
+    const double pixel = glow_pixel();
+    c.real += Fixed((x - state.screen_w * 0.5) * pixel);
+    c.imag += Fixed((y - state.screen_h * 0.5) * pixel);
+    return c;
+}
+
+// Cells that are all in the set (or not calculated) have nothing hidden that the image doesn't show
+bool glow_cell_worth(int cell) {
+    const int x0 = cell % GLOW_COLUMNS * GLOW_CELL, y0 = cell / GLOW_COLUMNS * GLOW_CELL;
+    for (int y = y0; y < y0 + GLOW_CELL && y < state.screen_h; ++y) {
+        for (int x = x0; x < x0 + GLOW_CELL && x < state.screen_w; ++x) {
+            if (state.pixelState[y][x].hasPosition()) return true;
+        }
+    }
+    return false;
+}
+
+void glow_next_cell() {
+    while (++glow_cell < GLOW_COLUMNS * GLOW_ROWS) {
+        if (!glow_cell_worth(glow_cell)) continue;
+        const float cx = (glow_cell % GLOW_COLUMNS + 0.5f) * GLOW_CELL, cy = (glow_cell / GLOW_COLUMNS + 0.5f) * GLOW_CELL;
+        finder.probe(glow_point(cx, cy), GLOW_CELL * 0.7071 * glow_pixel());
+        return;
+    }
+    glow_cell = -1;
+    glow_done = true;
+    state.needs_redraw = true;
+}
+
+// A probe is done: keeps the minibrot if it lies in its cell (so none counts twice) and is too small to see
+void glow_probe_done() {
+    if (!finder.found()) return;
+    const MinibrotFinder::Result& r = finder.result();
+    const double pixel = glow_pixel();
+    const float x = static_cast<float>((r.nucleus.real - state.center.real).to_double() / pixel + state.screen_w * 0.5);
+    const float y = static_cast<float>((r.nucleus.imag - state.center.imag).to_double() / pixel + state.screen_h * 0.5);
+    const int cx = glow_cell % GLOW_COLUMNS, cy = glow_cell / GLOW_COLUMNS;
+    if (!(x >= cx * GLOW_CELL && x < (cx + 1) * GLOW_CELL && y >= cy * GLOW_CELL && y < (cy + 1) * GLOW_CELL)) return;
+    // It fills the screen at its zoom, the set is about 2.5 of the 4 units wide
+    const float px = static_cast<float>(state.screen_w * state.zoom_factor / r.zoom() * 0.625);
+    if (!(px < GLOW_VISIBLE_PX)) return;
+    // Sorted, biggest first
+    int i = std::min(glow_count, GLOW_MAX - 1);
+    if (glow_count == GLOW_MAX && px <= glow_spots[i].px) return;
+    for (; i > 0 && glow_spots[i - 1].px < px; --i) glow_spots[i] = glow_spots[i - 1];
+    glow_spots[i] = {x, y, px};
+    glow_count = std::min(glow_count + 1, GLOW_MAX);
+}
+
+void glow_clear() {
+    if (glow_cell >= 0) finder.stop();
+    glow_cell = -1;
+    glow_count = 0;
+    glow_done = false;
+    glow_calculation = state.calculation_id;
+}
+
+// Core0 work: one slice of the scan. Returns false when there's nothing to do.
+bool glow_work(bool (*interrupt)()) {
+    if (!glow_on) return false;
+    if (state.calculation_id != glow_calculation) {
+        const bool shown = glow_count > 0;
+        glow_clear();
+        if (shown) state.needs_redraw = true;
+    }
+    if (glow_done || state.calculating) return false;
+    if (glow_cell < 0) glow_next_cell();
+    const uint32_t until = now_ms() + CORE0_WORK_MS;
+    while (glow_cell >= 0 && static_cast<int32_t>(until - now_ms()) > 0 && !(interrupt && interrupt())) {
+        if (!finder.work(256)) {
+            glow_probe_done();
+            glow_next_cell();
+        }
+    }
+    return true;
+}
+
+bool glow_shown() {
+    return glow_on && glow_done && glow_count > 0 && !menu::is_open();
+}
+
+void draw_glow() {
+    menu::set_clip({0, 0, SCREEN_W, SCREEN_H});
+    for (int i = 0; i < glow_count; ++i) {
+        const GlowSpot& s = glow_spots[i];
+        // Bigger minibrots glow bigger and brighter: 0 for the tiniest, 1 at the size where they become visible
+        const float strength = std::clamp(std::log2(s.px * 32768.0f / GLOW_VISIBLE_PX) / 15.0f, 0.0f, 1.0f);
+        const float radius = 6.0f + 16.0f * strength;
+        if (!menu::visible({static_cast<int>(s.x - radius), static_cast<int>(s.y - radius),
+                            static_cast<int>(2 * radius) + 2, static_cast<int>(2 * radius) + 2}))
+            continue;
+        // Discs on top of each other: a fade towards the edge
+        constexpr int LAYERS = 8;
+        const int alpha = static_cast<int>(30 + 24 * strength);
+        for (int k = LAYERS; k >= 1; --k) menu::disc(s.x, s.y, radius * k / LAYERS, GLOW_COLOR, alpha);
+    }
+}
+
+int glow_get(int) { return glow_on; }
+void glow_set(int, int v) {
+    glow_on = v != 0;
+    glow_clear();
+    state.needs_redraw = true;
+}
+
 // ---- Menu rows ----
 
 constexpr Color LIGHT_TEXT = {225, 226, 235};
@@ -1328,9 +1469,10 @@ constexpr menu::Item depth(int i) {
         .with_label(depth_label).with_param(i).when(depth_enabled).decorated(depth_decor, 60).closing();
 }
 constexpr menu::Item FINDER_ITEMS[] = {
+    menu::toggle("Glow", glow_get, glow_set, "A soft glow over minibrots too small to see"),
     depth(0), depth(1), depth(2), depth(3), depth(4), depth(5), depth(6)};
-static_assert(sizeof(FINDER_ITEMS) / sizeof(FINDER_ITEMS[0]) == FINDER_DEPTHS, "a row for every depth");
-constexpr menu::Page FINDER_PAGE = {"Minibrots", &ICON_FINDER, VIEWS_COLOR, FINDER_ITEMS, FINDER_DEPTHS};
+static_assert(sizeof(FINDER_ITEMS) / sizeof(FINDER_ITEMS[0]) == 1 + FINDER_DEPTHS, "a row for every depth");
+constexpr menu::Page FINDER_PAGE = {"Minibrots", &ICON_FINDER, VIEWS_COLOR, FINDER_ITEMS, 1 + FINDER_DEPTHS};
 
 constexpr menu::Item COLORS_ITEMS[] = {
     menu::choice("Palette", palette_get, palette_set, palette_count, palette_text, "The colors of the image")
@@ -1661,7 +1803,7 @@ void handle(Input input, int button) {
     state.needs_redraw = true;
     const bool was_open = menu::is_open();
     // Moving the view stops a minibrot search (the menu doesn't)
-    if (finder.busy() && !was_open
+    if (user_search() && !was_open
             && (input == Input::PRESS || input == Input::LONG || input == Input::REPEAT || input == Input::QUICK)) {
         finder.stop();
         toast("Search stopped");
@@ -1720,7 +1862,7 @@ bool update(uint32_t now, uint32_t elapsed_ms) {
     }
 
     // The search shows that it's still busy, every second
-    if (finder.busy() && (now - search_started_ms) / 1000 != search_seconds) {
+    if (user_search() && (now - search_started_ms) / 1000 != search_seconds) {
         search_seconds = (now - search_started_ms) / 1000;
         long_toast("Looking for a minibrot... %lu s", static_cast<unsigned long>(search_seconds));
     }
@@ -1767,7 +1909,7 @@ bool update(uint32_t now, uint32_t elapsed_ms) {
 }
 
 bool work(bool (*interrupt)()) {
-    if (!finder.busy()) return false;
+    if (!user_search()) return glow_work(interrupt);
     const uint32_t until = now_ms() + CORE0_WORK_MS;
     while (finder.busy() && static_cast<int32_t>(until - now_ms()) > 0 && !(interrupt && interrupt())) {
         finder.work(256);
@@ -1777,12 +1919,13 @@ bool work(bool (*interrupt)()) {
 }
 
 bool searching() {
-    return finder.busy();
+    return user_search();
 }
 
 bool overlay_wanted() {
     const uint32_t now = now_ms();
-    return menu::is_open() || quick_shown || hud_visible(now) || toast_active(now) || orbit_shown();
+    return menu::is_open() || quick_shown || hud_visible(now) || toast_active(now) || orbit_shown()
+        || glow_shown();
 }
 
 void led_color(uint8_t& r, uint8_t& g, uint8_t& b) {
@@ -1791,7 +1934,7 @@ void led_color(uint8_t& r, uint8_t& g, uint8_t& b) {
         c = menu::color();
     else if (quick_shown)
         c = {200, 0, 255};
-    else if (finder.busy())
+    else if (user_search())
         c = {255, 60, 160};
     else if (state.calculating)
         c = {255, 150, 0};
@@ -1822,6 +1965,7 @@ void draw_strip(PicoGraphics& g, uint16_t* strip, int first_row, int rows) {
     if (!shown.overlay) return;
     draw_overlay_texts(g, first_row, rows);
     menu::begin_strip(g, strip, first_row, rows);
+    if (glow_shown()) draw_glow();
     menu::draw();
     if (orbit_shown()) draw_orbit();
     if (shown.toast) {
