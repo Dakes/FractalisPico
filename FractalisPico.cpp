@@ -2,6 +2,7 @@
 #include "pico/stdio_usb.h"
 #include "pico/multicore.h"
 #include "pico/flash.h"
+#include "pico/unique_id.h"
 #include "pico/stdio.h"
 #include "hardware/clocks.h"
 #include "hardware/spi.h"
@@ -77,6 +78,19 @@ uint32_t system_clock_khz() {
     return clock_get_hz(clk_sys) / 1000;
 }
 
+// SCREEN.BMP on the USB drive. With its own scratch space: it runs while core0 draws a frame, or on core1.
+void usb_image_row(int y, uint16_t* row) {
+    static PixelState scratch[2 * width];
+    color_palette.render_rows(state.pixelState, state.screen_w, state.screen_h, y, 1, row, &state.content, scratch);
+    for (int x = 0; x < state.screen_w; ++x) row[x] = static_cast<uint16_t>((row[x] >> 8) | (row[x] << 8));
+}
+
+uint32_t usb_serial() {
+    pico_unique_board_id_t id;
+    pico_get_unique_board_id(&id);
+    return id.id[0] | (id.id[1] << 8) | (id.id[2] << 16) | (static_cast<uint32_t>(id.id[3]) << 24);
+}
+
 /**
  * Above 200 MHz the flash gets a bigger clock divider (at most 100 MHz flash clock, like at 200 MHz / 2) and read
  * delay. Runs from RAM: the flash is read with the new timing right after.
@@ -131,8 +145,9 @@ int main() {
     st7789.set_backlight(255);
     display.set_drawer(draw_strip);
 
+    // USB: the serial port of the log and the drive with the views (UsbDevice.cpp)
+    stdio_init_all();
     if (DEBUG) {
-        stdio_init_all();
         // Give a serial terminal a moment to connect, so the first messages aren't lost
         uint32_t start = now_ms();
         while (!stdio_usb_connected() && now_ms() - start < USB_WAIT_MS) {

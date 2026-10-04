@@ -1,12 +1,15 @@
 #include "Ui.hpp"
 #include "Menu.hpp"
 #include "MinibrotFinder.hpp"
+#include "UsbDrive.hpp"
 #include "globals.h"
 #include "libraries/pico_graphics/pico_graphics.hpp"
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
 #include <complex>
 #include <cstring>
 
@@ -405,6 +408,285 @@ void store_in_slot(int slot) {
     }
 }
 
+// ---- USB drive: the views as text (see UsbDrive.hpp and its README.TXT) ----
+
+const char* const USB_KEYWORDS[] = {"current", "slot"};
+// Line 0 is the current view, 1 to 10 the slots
+constexpr int USB_LINES = 1 + settings::VIEW_SLOTS;
+// The lines of VIEWS.TXT, hashed: a line written back unchanged changes nothing
+uint32_t usb_line_hash[USB_LINES];
+
+// FNV-1a of the words of a line, the spaces between them don't count
+uint32_t line_hash(const char* s) {
+    uint32_t h = 2166136261u;
+    bool space = false;
+    for (; *s; ++s) {
+        if (*s == ' ') {
+            space = true;
+            continue;
+        }
+        if (space) h = (h ^ ' ') * 16777619u;
+        space = false;
+        h = (h ^ static_cast<uint8_t>(*s)) * 16777619u;
+    }
+    return h;
+}
+
+bool same_name(const char* a, const char* b) {
+    for (; *a && *b; ++a, ++b) {
+        char x = *a == ' ' ? '-' : static_cast<char>(tolower(*a));
+        char y = *b == ' ' ? '-' : static_cast<char>(tolower(*b));
+        if (x != y) return false;
+    }
+    return *a == *b;
+}
+
+// Names in the text have - instead of spaces
+void put_name(char* out, int size, const char* name) {
+    int i = 0;
+    for (; name[i] && i < size - 1; ++i) out[i] = name[i] == ' ' ? '-' : name[i];
+    out[i] = '\0';
+}
+
+const char* bands_name(uint8_t id) {
+    for (const Bands& b : BANDS) {
+        if (b.id == id) return b.name;
+    }
+    return BANDS[DEFAULT_BANDS].name;
+}
+
+// The shortest decimal that reads back as the same value (up to the last bits): typed values stay as they were
+// typed, others get all their digits
+void format_center(const Fixed& value, char* out, int size) {
+    char text[100];
+    auto print = [&](int decimals) {
+        Fixed half(0.5);
+        for (int i = 0; i < decimals; ++i) half = half.divided(10);
+        format_coordinate(value.negative() ? value - half : value + half, decimals, 1000, text, sizeof(text));
+    };
+    auto exact = [&]() {
+        Fixed difference = Fixed::parse(text) - value;
+        if (difference.negative()) difference = -difference;
+        for (int i = 1; i < Fixed::LIMBS; ++i) {
+            if (difference.limb[i]) return false;
+        }
+        return difference.limb[0] <= 4;
+    };
+    // More decimals are exact as well
+    int low = 1, high = 75;
+    while (low < high) {
+        int middle = (low + high) / 2;
+        print(middle);
+        if (exact()) high = middle;
+        else low = middle + 1;
+    }
+    print(low);
+    const char* start = text[0] == ' ' ? text + 1 : text;
+    int n = static_cast<int>(strlen(start));
+    while (n > 2 && start[n - 1] == '0' && start[n - 2] != '.') n--;
+    snprintf(out, size, "%.*s", n, start);
+}
+
+int view_line(char* out, int size, const char* name, const settings::View& v) {
+    char re[100], im[100];
+    format_center(v.center.real, re, sizeof(re));
+    format_center(v.center.imag, im, sizeof(im));
+    int n = snprintf(out, size, "%s zoom %.10g re %s im %s", name, v.zoom, re, im);
+    if (v.has_look && n < size) {
+        char palette_text[24], light_text[24];
+        put_name(palette_text, sizeof(palette_text), palette::name(v.palette));
+        put_name(light_text, sizeof(light_text), LIGHT_NAMES[v.light % LIGHT_COUNT]);
+        n += snprintf(out + n, size - n, " palette %s bands %s trap %s shading %s light %s", palette_text,
+                      bands_name(v.bands), TRAP_NAMES[v.orbit_trap % Fractalis::TRAP_COUNT],
+                      v.shading ? "on" : "off", light_text);
+    }
+    return std::min(n, size - 1);
+}
+
+settings::View current_view() {
+    settings::View v = {};
+    v.center = state.center;
+    v.zoom = state.zoom_factor;
+    v.has_look = 1;
+    v.palette = static_cast<uint8_t>(color_palette.index());
+    v.bands = BANDS[bands].id;
+    v.orbit_trap = static_cast<uint8_t>(fractalis.orbit_trap());
+    v.shading = color_palette.shading;
+    v.light = static_cast<uint8_t>(light);
+    return v;
+}
+
+// VIEWS.TXT
+int usb_views(char* out, int size) {
+    int n = snprintf(out, size, "FractalisPico views. Change a line and save, see README.TXT\r\n\r\n");
+    char text[300];
+    for (int i = 0; i < USB_LINES; ++i) {
+        char name[8];
+        snprintf(name, sizeof(name), i == 0 ? "current" : "slot%d", i);
+        settings::View v;
+        if (i == 0) {
+            int n = view_line(text, sizeof(text), name, current_view());
+            // Where auto zoom dives to, e.g. a minibrot found here
+            if (autoZoom.has_target()) snprintf(text + n, sizeof(text) - n, " target %.10g", autoZoom.target_zoom());
+        } else if (slot_view(i - 1, v)) {
+            view_line(text, sizeof(text), name, v);
+        } else {
+            snprintf(text, sizeof(text), "%s empty", name);
+        }
+        usb_line_hash[i] = line_hash(text);
+        if (n + static_cast<int>(strlen(text)) + 2 < size) n += snprintf(out + n, size - n, "%s\r\n", text);
+    }
+    return n;
+}
+
+// A line like those of VIEWS.TXT. index: 0 = current, 1 to 10 = slot.
+struct UsbLine {
+    int index;
+    bool empty;
+    settings::View view;
+    double target;  // zoom auto zoom dives to, 0 = none
+};
+
+bool parse_usb_line(const char* text, UsbLine& out) {
+    char words[400];
+    snprintf(words, sizeof(words), "%s", text);
+    char* word[48];
+    int count = 0;
+    for (char* p = strtok(words, " "); p && count < 48; p = strtok(nullptr, " ")) word[count++] = p;
+    if (count == 0) return false;
+    out = {};
+    if (strcmp(word[0], "current") == 0) {
+        out.index = 0;
+    } else if (strncmp(word[0], "slot", 4) == 0) {
+        char* end;
+        long slot = strtol(word[0] + 4, &end, 10);
+        if (*end || slot < 1 || slot > settings::VIEW_SLOTS) return false;
+        out.index = static_cast<int>(slot);
+    } else {
+        return false;
+    }
+    if (count == 2 && strcmp(word[1], "empty") == 0) {
+        out.empty = out.index > 0;
+        return out.empty;
+    }
+
+    // The look of the device for what the line leaves out
+    settings::View& v = out.view;
+    v = current_view();
+    v.has_look = 0;
+    bool zoom = false, re = false, im = false;
+    auto decimal = [](const char* s, Fixed& value) {
+        // -?digits(.digits)?
+        const char* p = s + (*s == '-');
+        int digits = 0, points = 0;
+        for (; *p; ++p) {
+            if (*p == '.') points++;
+            else if (*p >= '0' && *p <= '9') digits++;
+            else return false;
+        }
+        if (digits == 0 || points > 1 || std::abs(atof(s)) > 16) return false;
+        value = Fixed::parse(s);
+        return true;
+    };
+    for (int i = 1; i + 1 < count; i += 2) {
+        const char* key = word[i];
+        const char* value = word[i + 1];
+        bool found = false;
+        if (strcmp(key, "zoom") == 0) {
+            char* end;
+            v.zoom = strtod(value, &end);
+            zoom = !*end && std::isfinite(v.zoom) && v.zoom > 0;
+            if (!zoom) return false;
+        } else if (strcmp(key, "target") == 0) {
+            char* end;
+            out.target = strtod(value, &end);
+            if (*end || !(out.target > 0) || !std::isfinite(out.target)) out.target = 0;
+        } else if (strcmp(key, "re") == 0) {
+            if (!(re = decimal(value, v.center.real))) return false;
+        } else if (strcmp(key, "im") == 0) {
+            if (!(im = decimal(value, v.center.imag))) return false;
+        } else if (strcmp(key, "palette") == 0) {
+            for (int k = 0; k < palette::count() && !found; ++k) {
+                if ((found = same_name(value, palette::name(k)))) v.palette = static_cast<uint8_t>(k);
+            }
+            v.has_look = 1;
+        } else if (strcmp(key, "bands") == 0) {
+            for (int k = 0; k < BANDS_COUNT && !found; ++k) {
+                if ((found = same_name(value, BANDS[k].name))) v.bands = BANDS[k].id;
+            }
+            v.has_look = 1;
+        } else if (strcmp(key, "trap") == 0) {
+            for (int k = 0; k < Fractalis::TRAP_COUNT && !found; ++k) {
+                if ((found = same_name(value, TRAP_NAMES[k]))) v.orbit_trap = static_cast<uint8_t>(k);
+            }
+            v.has_look = 1;
+        } else if (strcmp(key, "shading") == 0) {
+            v.shading = same_name(value, "on");
+            v.has_look = 1;
+        } else if (strcmp(key, "light") == 0) {
+            for (int k = 0; k < LIGHT_COUNT && !found; ++k) {
+                if ((found = same_name(value, LIGHT_NAMES[k]))) v.light = static_cast<uint8_t>(k);
+            }
+            v.has_look = 1;
+        }
+        // Other words are left for later versions
+    }
+    return zoom && re && im;
+}
+
+/**
+ * The lines the computer wrote: the slots are stored, the current view is where it goes. Only what differs from
+ * VIEWS.TXT, then the drive shows the new state.
+ */
+void usb_import() {
+    char text[400];
+    UsbLine current = {};
+    bool go = false;
+    int stored = 0, last_slot = 0;
+    while (usb_drive::next_line(text, sizeof(text))) {
+        UsbLine l;
+        if (!parse_usb_line(text, l) || line_hash(text) == usb_line_hash[l.index]) continue;
+        if (l.index == 0) {
+            current = l;
+            go = true;
+            continue;
+        }
+        const int slot = l.index - 1;
+        if (l.empty ? settings::clear_view(slot) : settings::store_view(slot, l.view, nullptr)) {
+            if (slot < 2) legacy_slots[slot].zoom = 0;
+            stored++;
+            last_slot = slot;
+        }
+        usb_line_hash[l.index] = line_hash(text);
+    }
+    if (go) {
+        const settings::View& v = current.view;
+        if (v.has_look) {
+            color_palette.select(v.palette);
+            set_bands_id(v.bands);
+            fractalis.set_orbit_trap(v.orbit_trap);
+            color_palette.shading = v.shading;
+            set_light(v.light);
+        }
+        jump(v.center, v.zoom);
+        if (current.target > 0) {
+            autoZoom.set_target(state.center, std::min(current.target, PRECISION_MAX_ZOOM));
+            target_period = 0;
+        }
+    }
+    if (!go && stored == 0) return;
+    if (go && stored)
+        long_toast("From USB: the view, %d slot%s", stored, stored > 1 ? "s" : "");
+    else if (go)
+        long_toast("From USB: went to the view");
+    else if (stored == 1)
+        long_toast("From USB: slot %d", last_slot + 1);
+    else
+        long_toast("From USB: %d slots", stored);
+    show_led_feedback(255, 255, 255, 300);
+    usb_drive::refresh();
+}
+
 // ---- Icons ----
 
 const menu::Icon ICON_MANDELBROT = {{
@@ -753,6 +1035,12 @@ void depth_decor(int i, int, const Box& box) {
 }
 void depth_run(int i) { find_minibrot(i); }
 
+void usb_run(int) {
+    usb_drive::refresh();
+    toast("USB drive: back in a few seconds");
+}
+const char* usb_text(int, int, char*, int) { return usb_drive::present() ? "" : "away"; }
+
 void slot_run(int slot) { go_to_slot(slot); }
 void slot_hold(int slot) { store_in_slot(slot); }
 
@@ -962,9 +1250,11 @@ constexpr menu::Item VIEWS_ITEMS[] = {
     menu::action("Reset view", reset_view, "Back to the whole set").closing(),
     menu::page("Places", PLACES_PAGE, "Famous spots and deep zoom tests"),
     menu::page("Minibrots", FINDER_PAGE, "Finds one at the zoom you choose, auto zoom dives there"),
+    menu::action("Update USB drive", usb_run, "Puts the views and the picture on the USB drive, it reconnects")
+        .with_value(usb_text),
     slot(0), slot(1), slot(2), slot(3), slot(4), slot(5), slot(6), slot(7), slot(8), slot(9),
 };
-static_assert(sizeof(VIEWS_ITEMS) / sizeof(VIEWS_ITEMS[0]) == 4 + settings::VIEW_SLOTS, "a row for every slot");
+static_assert(sizeof(VIEWS_ITEMS) / sizeof(VIEWS_ITEMS[0]) == 5 + settings::VIEW_SLOTS, "a row for every slot");
 constexpr menu::Page VIEWS_PAGE = {"Views", &ICON_BOOKMARK, VIEWS_COLOR, VIEWS_ITEMS,
                                    sizeof(VIEWS_ITEMS) / sizeof(VIEWS_ITEMS[0])};
 
@@ -1135,7 +1425,10 @@ void render_overlay(PicoGraphics& g, uint32_t now) {
         info_y += font8_height + margin;
         char zoom_text[16], target_text[48];
         format_deep_zoom(zoom_text, sizeof(zoom_text), autoZoom.target_zoom());
-        snprintf(target_text, sizeof(target_text), "Minibrot at %s, period %d", zoom_text, target_period);
+        if (target_period > 0)
+            snprintf(target_text, sizeof(target_text), "Minibrot at %s, period %d", zoom_text, target_period);
+        else
+            snprintf(target_text, sizeof(target_text), "Auto zoom target: %s", zoom_text);
         add_text(g, target_text, Point(margin, info_y));
     }
 
@@ -1218,6 +1511,8 @@ void start(bool defaults) {
     }
     if (!loaded) saved = current_settings();
     menu::set_root(MAIN_PAGE);
+    usb_drive::start(usb_image_row, usb_views, USB_KEYWORDS, sizeof(USB_KEYWORDS) / sizeof(USB_KEYWORDS[0]),
+                     usb_serial());
 }
 
 void handle(Input input, int button) {
@@ -1267,6 +1562,9 @@ void handle(Input input, int button) {
 }
 
 bool update(uint32_t now, uint32_t elapsed_ms) {
+    usb_drive::update(now);
+    usb_import();
+
     if (menu::is_open() && now - last_input_ms >= MENU_TIMEOUT_MS) {
         menu::close();
         menu_active = false;

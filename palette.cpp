@@ -316,13 +316,18 @@ static PixelState displayed(PixelState* const* pixels, int width, int height, in
 
 void Palette::render_rows(PixelState* const* pixels, int width, int height, int first_row, int rows,
                           uint16_t* out_rows, const ScreenRect* content) const {
+    // Static: too big for the stack, and only core0 draws the frames
+    static PixelState rows_buffer[2 * MAX_WIDTH];
+    render_rows(pixels, width, height, first_row, rows, out_rows, content, rows_buffer);
+}
+
+void Palette::render_rows(PixelState* const* pixels, int width, int height, int first_row, int rows,
+                          uint16_t* out_rows, const ScreenRect* content, PixelState* scratch) const {
     const int64_t start = static_cast<int64_t>(range_start);
-    // The displayed values of the row and the one below, for the shading. Static: too big for the stack, and only
-    // core0 draws.
-    static PixelState rows_buffer[2][MAX_WIDTH];
     if (width > MAX_WIDTH) return;
-    PixelState* row = rows_buffer[0];
-    PixelState* below = rows_buffer[1];
+    // The displayed values of the row and the one below, for the shading
+    PixelState* row = scratch;
+    PixelState* below = scratch + width;
     auto fill = [&](PixelState* out, int y) {
         for (int x = 0; x < width; ++x) out[x] = displayed(pixels, width, height, x, y, content);
     };

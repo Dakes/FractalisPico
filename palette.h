@@ -88,6 +88,9 @@ public:
     // content: see FractalisState::content, pixels outside of it that aren't calculated yet show its edge
     void render_rows(PixelState* const* pixels, int width, int height, int first_row, int rows,
                      uint16_t* out_rows, const ScreenRect* content = nullptr) const;
+    // The same with its own scratch space (2 * width), so it can run alongside the drawing of the frames
+    void render_rows(PixelState* const* pixels, int width, int height, int first_row, int rows,
+                     uint16_t* out_rows, const ScreenRect* content, PixelState* scratch) const;
 
 private:
     int current;

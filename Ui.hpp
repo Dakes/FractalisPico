@@ -22,6 +22,11 @@ void show_led_feedback(uint8_t r, uint8_t g, uint8_t b, uint32_t duration_ms);
 // For the statistics page
 uint32_t system_clock_khz();
 unsigned free_ram();
+// SCREEN.BMP on the USB drive: a row of the image, RGB565 in native byte order. Called from the USB side, alongside
+// the drawing of the frames.
+void usb_image_row(int y, uint16_t* row);
+// Serial number of the USB drive
+uint32_t usb_serial();
 
 /**
  * What is shown on top of the image and changed with the buttons: the info overlay, the menu (see menu.hpp) and the

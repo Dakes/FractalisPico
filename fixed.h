@@ -103,25 +103,32 @@ struct Fixed {
         return r;
     }
 
-    // From a decimal number like "-0.7436...", exact up to the precision
+    /**
+     * From a decimal number like "-0.7436...", to about the last bit: the fraction is summed up from its last digit
+     * (Horner), so the rounding of each step shrinks with the steps after it. Other characters are skipped.
+     */
     static Fixed parse(const char* text) {
         bool neg = *text == '-';
         if (*text == '-' || *text == '+') ++text;
-        Fixed value = 0.0, place = 1.0;
-        bool fraction = false;
+        Fixed integer = 0.0;
+        const char* fraction = nullptr;
         for (; *text; ++text) {
             if (*text == '.') {
-                fraction = true;
-            } else if (*text >= '0' && *text <= '9') {
-                int digit = *text - '0';
-                if (fraction) {
-                    place = place.divided(10);
-                    value += place.times(digit);
-                } else {
-                    value = value.times(10) + Fixed(static_cast<double>(digit));
-                }
+                fraction = text + 1;
+                break;
+            }
+            if (*text >= '0' && *text <= '9') integer = integer.times(10) + Fixed(static_cast<double>(*text - '0'));
+        }
+        Fixed value = 0.0;
+        if (fraction) {
+            const char* p = fraction;
+            while (*p) ++p;
+            while (p > fraction) {
+                --p;
+                if (*p >= '0' && *p <= '9') value = (value + Fixed(static_cast<double>(*p - '0'))).divided(10);
             }
         }
+        value += integer;
         return neg ? -value : value;
     }
 

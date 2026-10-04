@@ -76,6 +76,8 @@ const uint16_t* thumbnail(int slot);
  * Erases two sectors: stalls both cores for ~100 ms.
  */
 bool store_view(int slot, const View& view, void (*draw_thumbnail)(uint16_t* out));
+// Empties the slot, stalls both cores like store_view()
+bool clear_view(int slot);
 
 }  // namespace settings
 

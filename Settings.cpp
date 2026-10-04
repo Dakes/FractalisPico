@@ -159,7 +159,7 @@ struct AreaWrite {
 void write_area(void* param) {
     const AreaWrite* w = static_cast<const AreaWrite*>(param);
     flash_range_erase(w->offset, w->erase_size);
-    flash_range_program(w->offset, w->data, w->size);
+    if (w->size) flash_range_program(w->offset, w->data, w->size);
 }
 
 }  // namespace
@@ -248,6 +248,15 @@ bool store_view(int slot, const View& view, void (*draw_thumbnail)(uint16_t* out
     else
         printf("Storing the view in slot %d failed (%d)\n", slot + 1, result);
     return stored;
+}
+
+bool clear_view(int slot) {
+    if (slot < 0 || slot >= VIEW_SLOTS) return false;
+    if (!storage_free()) return false;
+    AreaWrite w = {VIEWS_OFFSET + slot * VIEW_SLOT_SIZE, VIEW_SLOT_SIZE, nullptr, 0};
+    int result = flash_safe_execute(write_area, &w, FLASH_TIMEOUT_MS);
+    view_checked[slot] = 0;
+    return result == PICO_OK && view(slot) == nullptr;
 }
 
 }  // namespace settings

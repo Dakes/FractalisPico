@@ -59,6 +59,8 @@ add_executable(${NAME}
     Menu.cpp
     Ui.cpp
     MinibrotFinder.cpp
+    UsbDrive.cpp
+    UsbDevice.cpp
 )
 
 # Include required libraries
@@ -105,6 +107,20 @@ target_link_libraries(${NAME}
     rgbled
     button
     st7789
+    # USB: own descriptors for the serial port, the drive and picotool's reset interface (UsbDevice.cpp)
+    tinyusb_device
+    pico_usb_reset
+    pico_unique_id
+)
+
+# The SDK's serial port over USB still starts TinyUSB and runs it in the background, the descriptors come from
+# UsbDevice.cpp. The reset interface (picotool load -f) is interface 3.
+target_compile_definitions(${NAME} PRIVATE
+    PICO_STDIO_USB_ENABLE_TINYUSB_INIT=1
+    PICO_STDIO_USB_ENABLE_IRQ_BACKGROUND_TASK=1
+    PICO_ENABLE_USB_RESET_VIA_VENDOR_INTERFACE=1
+    PICO_USB_RESET_SUPPORT_MS_OS_20_DESCRIPTOR=1
+    PICO_USB_RESET_MS_OS_20_DESCRIPTOR_ITF=3
 )
 
 target_compile_options(${NAME} PRIVATE
