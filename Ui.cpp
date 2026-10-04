@@ -190,7 +190,6 @@ MinibrotFinder finder;
 uint32_t search_started_ms = 0;
 uint32_t search_seconds = 0;  // shown in the message
 int target_period = 0;        // of the minibrot auto zoom dives to
-double last_minibrot = 0;     // zoom of the last minibrot found, the base of the next stack level
 
 // The menu offers x1e10 to x1e70
 constexpr int FINDER_DEPTHS = 7;
@@ -239,7 +238,7 @@ int search_starts(Coordinate* out) {
     return count;
 }
 
-void find_minibrot(double target) {
+void find_minibrot(int depth) {
     Coordinate starts[MinibrotFinder::MAX_STARTS];
     const int count = search_starts(starts);
     if (count == 0) {
@@ -247,7 +246,7 @@ void find_minibrot(double target) {
         show_led_feedback(255, 0, 0, 300);
         return;
     }
-    finder.start(starts, count, target);
+    finder.start(starts, count, finder_depth(depth));
     search_started_ms = now_ms();
     search_seconds = 0;
     toast("Looking for a minibrot...");
@@ -273,7 +272,6 @@ void search_done() {
     fractalis.move_to(center);
     autoZoom.set_target(state.center, r.zoom());
     target_period = r.period;
-    last_minibrot = r.zoom();
     char zoom_text[16];
     format_deep_zoom(zoom_text, sizeof(zoom_text), r.zoom());
     printf("Minibrot of period %d at zoom %.3e (target %.0e) after %lu iterations, %d probes, %lu ms\n", r.period,
@@ -331,13 +329,13 @@ bool slot_view(int slot, settings::View& out) {
 }
 
 // The image at 1/5 of its size, each pixel the average of 5 x 5
-void draw_thumbnail(uint16_t* out) {
+void draw_thumbnail(int first_row, int rows, uint16_t* out) {
     constexpr int SCALE = SCREEN_W / settings::THUMBNAIL_W;
     static_assert(SCALE * settings::THUMBNAIL_W == SCREEN_W && SCALE * settings::THUMBNAIL_H == SCREEN_H,
                   "the thumbnail must be the screen scaled down");
     static uint16_t row[SCREEN_W];
     static uint16_t sums[settings::THUMBNAIL_W][3];
-    for (int ty = 0; ty < settings::THUMBNAIL_H; ++ty) {
+    for (int ty = first_row; ty < first_row + rows; ++ty) {
         memset(sums, 0, sizeof(sums));
         for (int dy = 0; dy < SCALE; ++dy) {
             color_palette.render_rows(state.pixelState, state.screen_w, state.screen_h, ty * SCALE + dy, 1, row,
@@ -354,7 +352,7 @@ void draw_thumbnail(uint16_t* out) {
             constexpr int N = SCALE * SCALE;
             uint16_t v = static_cast<uint16_t>(((sums[tx][0] + N / 2) / N << 11) | ((sums[tx][1] + N / 2) / N << 5)
                                                | (sums[tx][2] + N / 2) / N);
-            out[ty * settings::THUMBNAIL_W + tx] = static_cast<uint16_t>((v >> 8) | (v << 8));
+            out[(ty - first_row) * settings::THUMBNAIL_W + tx] = static_cast<uint16_t>((v >> 8) | (v << 8));
         }
     }
 }
@@ -1173,23 +1171,8 @@ void depth_decor(int i, int, const Box& box) {
     const double here = std::log10(std::max(1.0, state.zoom_factor)) / full;
     menu::fill({x + static_cast<int>(w * std::min(here, 1.0)), y - 3, 2, 11}, {255, 255, 255});
 }
-void depth_run(int i) { find_minibrot(finder_depth(i)); }
+void depth_run(int i) { find_minibrot(i); }
 
-/**
- * Shape stacking: zooming off center towards a spot in the pattern around a minibrot doubles the shape there, and
- * at about twice the zoom's exponent (counted from the minibrot) sits a minibrot inside the doubled shape. Each
- * level doubles the exponent again.
- */
-double stack_target() {
-    const double base = last_minibrot > 0 && last_minibrot <= state.zoom_factor ? last_minibrot : 1.0;
-    return state.zoom_factor * (state.zoom_factor / base);
-}
-bool stack_enabled(int) { return stack_target() <= PRECISION_MAX_ZOOM && state.zoom_factor > 2.0; }
-const char* stack_text(int, int, char* buffer, int size) {
-    format_deep_zoom(buffer, size, stack_target());
-    return buffer;
-}
-void stack_run(int) { find_minibrot(stack_target()); }
 
 void usb_run(int) {
     usb_drive::refresh();
@@ -1345,12 +1328,9 @@ constexpr menu::Item depth(int i) {
         .with_label(depth_label).with_param(i).when(depth_enabled).decorated(depth_decor, 60).closing();
 }
 constexpr menu::Item FINDER_ITEMS[] = {
-    menu::action("Next stack level", stack_run,
-                 "Center a spot near a minibrot: finds the one in the doubled shape there")
-        .with_value(stack_text).when(stack_enabled).closing(),
     depth(0), depth(1), depth(2), depth(3), depth(4), depth(5), depth(6)};
-static_assert(sizeof(FINDER_ITEMS) / sizeof(FINDER_ITEMS[0]) == FINDER_DEPTHS + 1, "a row for every depth");
-constexpr menu::Page FINDER_PAGE = {"Minibrots", &ICON_FINDER, VIEWS_COLOR, FINDER_ITEMS, FINDER_DEPTHS + 1};
+static_assert(sizeof(FINDER_ITEMS) / sizeof(FINDER_ITEMS[0]) == FINDER_DEPTHS, "a row for every depth");
+constexpr menu::Page FINDER_PAGE = {"Minibrots", &ICON_FINDER, VIEWS_COLOR, FINDER_ITEMS, FINDER_DEPTHS};
 
 constexpr menu::Item COLORS_ITEMS[] = {
     menu::choice("Palette", palette_get, palette_set, palette_count, palette_text, "The colors of the image")

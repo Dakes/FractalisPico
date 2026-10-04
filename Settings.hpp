@@ -72,10 +72,11 @@ const View* view(int slot);
 // The picture of the view in the slot, nullptr if there is none
 const uint16_t* thumbnail(int slot);
 /**
- * Stores a view. draw_thumbnail draws its picture (THUMBNAIL_W x THUMBNAIL_H) into the buffer, nullptr: none.
+ * Stores a view. draw_thumbnail draws the rows first_row .. first_row + rows - 1 of its picture (THUMBNAIL_W x
+ * THUMBNAIL_H) into out, nullptr: none. Programmed a flash page at a time, so it needs next to no RAM.
  * Erases two sectors: stalls both cores for ~100 ms.
  */
-bool store_view(int slot, const View& view, void (*draw_thumbnail)(uint16_t* out));
+bool store_view(int slot, const View& view, void (*draw_thumbnail)(int first_row, int rows, uint16_t* out));
 // Empties the slot, stalls both cores like store_view()
 bool clear_view(int slot);
 

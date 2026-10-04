@@ -158,7 +158,7 @@ struct AreaWrite {
 // Like write_page()
 void write_area(void* param) {
     const AreaWrite* w = static_cast<const AreaWrite*>(param);
-    flash_range_erase(w->offset, w->erase_size);
+    if (w->erase_size) flash_range_erase(w->offset, w->erase_size);
     if (w->size) flash_range_program(w->offset, w->data, w->size);
 }
 
@@ -220,34 +220,47 @@ const uint16_t* thumbnail(int slot) {
     return reinterpret_cast<const uint16_t*>(view_address(slot) + FLASH_PAGE_SIZE);
 }
 
-bool store_view(int slot, const View& view, void (*draw_thumbnail)(uint16_t* out)) {
+bool store_view(int slot, const View& view, void (*draw_thumbnail)(int first_row, int rows, uint16_t* out)) {
     if (slot < 0 || slot >= VIEW_SLOTS) return false;
     if (!storage_free()) {
         printf("View not stored: the program reaches into the storage\n");
         return false;
     }
-    // The flash is programmed from RAM: the record page with the thumbnail behind it
-    uint8_t* buffer = new (std::nothrow) uint8_t[VIEW_BYTES];
-    if (!buffer) {
-        printf("View not stored: not enough memory\n");
-        return false;
-    }
-    memset(buffer, 0xFF, VIEW_BYTES);
-    ViewRecord r = {VIEW_MAGIC, VIEW_VERSION, draw_thumbnail != nullptr, 0, 0, view};
-    if (draw_thumbnail) draw_thumbnail(reinterpret_cast<uint16_t*>(buffer + FLASH_PAGE_SIZE));
-    r.checksum = view_checksum(r, buffer + FLASH_PAGE_SIZE);
-    memcpy(buffer, &r, sizeof(r));
-
-    AreaWrite w = {VIEWS_OFFSET + slot * VIEW_SLOT_SIZE, VIEW_SLOT_SIZE, buffer, VIEW_BYTES};
-    int result = flash_safe_execute(write_area, &w, FLASH_TIMEOUT_MS);
+    // The flash is programmed from RAM, a page at a time: the thumbnail first, the record page with its checksum last
+    static uint8_t page[FLASH_PAGE_SIZE];
+    constexpr int ROWS_PER_PAGE = FLASH_PAGE_SIZE / (THUMBNAIL_W * sizeof(uint16_t));
+    static_assert(ROWS_PER_PAGE * THUMBNAIL_W * sizeof(uint16_t) == FLASH_PAGE_SIZE
+                  && THUMBNAIL_H % ROWS_PER_PAGE == 0, "thumbnail rows must fill the pages");
+    const uint32_t offset = VIEWS_OFFSET + slot * VIEW_SLOT_SIZE;
+    const uint8_t* stored = view_address(slot);
     view_checked[slot] = 0;
-    bool stored = result == PICO_OK && memcmp(view_address(slot), buffer, VIEW_BYTES) == 0;
-    delete[] buffer;
-    if (stored)
+    AreaWrite w = {offset, VIEW_SLOT_SIZE, nullptr, 0};
+    int result = flash_safe_execute(write_area, &w, FLASH_TIMEOUT_MS);
+    ViewRecord r = {VIEW_MAGIC, VIEW_VERSION, draw_thumbnail != nullptr, 0, 0, view};
+    uint32_t hash = fnv(FNV_START, &r.view, sizeof(r.view));
+    for (int row = 0; draw_thumbnail && result == PICO_OK && row < THUMBNAIL_H; row += ROWS_PER_PAGE) {
+        draw_thumbnail(row, ROWS_PER_PAGE, reinterpret_cast<uint16_t*>(page));
+        hash = fnv(hash, page, FLASH_PAGE_SIZE);
+        const uint32_t at = FLASH_PAGE_SIZE + row / ROWS_PER_PAGE * FLASH_PAGE_SIZE;
+        w = {offset + at, 0, page, FLASH_PAGE_SIZE};
+        result = flash_safe_execute(write_area, &w, FLASH_TIMEOUT_MS);
+        if (result == PICO_OK && memcmp(stored + at, page, FLASH_PAGE_SIZE) != 0) result = -1;  // not as written
+    }
+    r.checksum = hash;
+    if (result == PICO_OK) {
+        memset(page, 0xFF, FLASH_PAGE_SIZE);
+        memcpy(page, &r, sizeof(r));
+        w = {offset, 0, page, FLASH_PAGE_SIZE};
+        result = flash_safe_execute(write_area, &w, FLASH_TIMEOUT_MS);
+    }
+    view_checked[slot] = 0;
+    const bool ok = result == PICO_OK && memcmp(stored, page, FLASH_PAGE_SIZE) == 0 && view_valid(slot);
+    view_checked[slot] = 0;  // checked again on the first read
+    if (ok)
         printf("View stored in slot %d\n", slot + 1);
     else
         printf("Storing the view in slot %d failed (%d)\n", slot + 1, result);
-    return stored;
+    return ok;
 }
 
 bool clear_view(int slot) {
