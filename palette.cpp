@@ -210,6 +210,17 @@ uint32_t trap_position(float distance_sq) {
     return static_cast<uint32_t>(std::max(0.0f, std::min(octaves * 262144.0f, 16777215.0f)));
 }
 
+uint32_t period_position(int period, float distance_sq) {
+    constexpr uint32_t BASE = 1u << 23;   // far from the fade in from black
+    constexpr uint32_t SPAN = 1u << 22;   // the periods spread over this
+    constexpr float GOLDEN = 0.61803399f;
+    const float x = static_cast<float>(period) * GOLDEN;
+    const uint32_t step = static_cast<uint32_t>((x - std::floor(x)) * SPAN);
+    // An octave of distance is 1/256 of the span: a different period always stands out
+    const uint32_t shade = std::min<uint32_t>(trap_position(distance_sq) / 16, 1u << 20);
+    return BASE + step + shade;
+}
+
 uint8_t spread_level(uint32_t range) {
     if (range < 2) return 1;
     // nearest level on the log scale, level k stands for 8^(k - 1)

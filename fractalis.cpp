@@ -16,6 +16,7 @@ struct Escape {
     bool aborted;
     float trap = INFINITY;  // orbit trap: smallest squared distance of the orbit to the trap shape
     bool proven = false;    // in the set because the orbit was found to repeat, not because it reached the limit
+    int period = 0;         // period map: the iteration where |z| came closest to 0
 };
 
 /**
@@ -55,6 +56,23 @@ struct TrapScope {
     }
 };
 
+/**
+ * Updates the trap with z after an iteration. The period map looks at the whole orbit: the iteration with the smallest
+ * |z| so far (the first one on a tie) is the period of the atom domain the pixel is in.
+ */
+template <int TRAP, typename Scope, typename T>
+inline void record_trap(float& trap, int& period, Scope& scope, int iteration, float zr, float zi, T magnitude_sq) {
+    if (TRAP == Fractalis::TRAP_OFF) return;
+    if (TRAP == Fractalis::TRAP_PERIOD) {
+        if (static_cast<float>(magnitude_sq) < trap) {
+            trap = static_cast<float>(magnitude_sq);
+            period = iteration;
+        }
+        return;
+    }
+    if (scope.counts(magnitude_sq)) trap = std::min(trap, trap_distance<TRAP>(zr, zi, static_cast<float>(magnitude_sq)));
+}
+
 // Calls f with the trap shape as a compile time constant
 template <typename F>
 Escape with_trap(int trap, const F& f) {
@@ -62,6 +80,7 @@ Escape with_trap(int trap, const F& f) {
         case Fractalis::TRAP_POINT: return f(std::integral_constant<int, Fractalis::TRAP_POINT>());
         case Fractalis::TRAP_CROSS: return f(std::integral_constant<int, Fractalis::TRAP_CROSS>());
         case Fractalis::TRAP_RING: return f(std::integral_constant<int, Fractalis::TRAP_RING>());
+        case Fractalis::TRAP_PERIOD: return f(std::integral_constant<int, Fractalis::TRAP_PERIOD>());
         default: return f(std::integral_constant<int, Fractalis::TRAP_OFF>());
     }
 }
@@ -118,27 +137,26 @@ Escape iterate(T cr, T ci, int iter_limit, T epsilon, bool check_periodicity, fl
     T saved_r = 0, saved_i = 0;
     int save_at = 8;
     float trap = INFINITY;
+    int period = 0;
     TrapScope<float> scope;
 
     for (int n = 0; n < iter_limit; ++n) {
-        if (TRAP != Fractalis::TRAP_OFF) scope.step(static_cast<float>(zr), static_cast<float>(zi), pixel_size);
+        if (TRAP != Fractalis::TRAP_OFF && TRAP != Fractalis::TRAP_PERIOD) scope.step(static_cast<float>(zr), static_cast<float>(zi), pixel_size);
         zi = (zr + zr) * zi + ci;
         zr = zr2 - zi2 + cr;
         zr2 = zr * zr;
         zi2 = zi * zi;
         if (zr2 + zi2 > static_cast<T>(BAILOUT_SQ)) {
-            return {n + 1, static_cast<float>(zr2 + zi2), false, false, trap};
+            return {n + 1, static_cast<float>(zr2 + zi2), false, false, trap, false, period};
         }
-        if (TRAP != Fractalis::TRAP_OFF && scope.counts(static_cast<float>(zr2 + zi2))) {
-            trap = std::min(trap, trap_distance<TRAP>(static_cast<float>(zr), static_cast<float>(zi),
-                                                      static_cast<float>(zr2 + zi2)));
-        }
+        record_trap<TRAP>(trap, period, scope, n + 1, static_cast<float>(zr), static_cast<float>(zi),
+                          static_cast<float>(zr2 + zi2));
         if ((n & ABORT_CHECK_MASK) == ABORT_CHECK_MASK && abort()) {
             return {n, 0.0f, false, true};
         }
         if (check_periodicity) {
             if (std::abs(zr - saved_r) + std::abs(zi - saved_i) < epsilon) {
-                return {n + 1, 0.0f, true, false, trap, true};
+                return {n + 1, 0.0f, true, false, trap, true, period};
             }
             if (n == save_at) {
                 saved_r = zr;
@@ -147,7 +165,7 @@ Escape iterate(T cr, T ci, int iter_limit, T epsilon, bool check_periodicity, fl
             }
         }
     }
-    return {iter_limit, 0.0f, true, false, trap};
+    return {iter_limit, 0.0f, true, false, trap, false, period};
 }
 
 // Lean double-double arithmetic for the iteration without perturbation
@@ -376,10 +394,11 @@ template <int TRAP, typename Abort>
 Escape iterate_dd(DD cr, DD ci, int iter_limit, float pixel_size, const Abort& abort) {
     DD zr = {0, 0}, zi = {0, 0}, zr2 = {0, 0}, zi2 = {0, 0};
     float trap = INFINITY;
+    int period = 0;
     TrapScope<float> scope;
 
     for (int n = 0; n < iter_limit; ++n) {
-        if (TRAP != Fractalis::TRAP_OFF) scope.step(static_cast<float>(zr.hi), static_cast<float>(zi.hi), pixel_size);
+        if (TRAP != Fractalis::TRAP_OFF && TRAP != Fractalis::TRAP_PERIOD) scope.step(static_cast<float>(zr.hi), static_cast<float>(zi.hi), pixel_size);
         DD zri = dd_mul(zr, zi);
         zi = dd_add({zri.hi * 2, zri.lo * 2}, ci);
         zr = dd_add(dd_sub(zr2, zi2), cr);
@@ -387,17 +406,15 @@ Escape iterate_dd(DD cr, DD ci, int iter_limit, float pixel_size, const Abort& a
         zi2 = dd_mul(zi, zi);
         double magnitude_sq = zr2.hi + zi2.hi;
         if (magnitude_sq > BAILOUT_SQ) {
-            return {n + 1, static_cast<float>(magnitude_sq), false, false, trap};
+            return {n + 1, static_cast<float>(magnitude_sq), false, false, trap, false, period};
         }
-        if (TRAP != Fractalis::TRAP_OFF && scope.counts(static_cast<float>(magnitude_sq))) {
-            trap = std::min(trap, trap_distance<TRAP>(static_cast<float>(zr.hi), static_cast<float>(zi.hi),
-                                                      static_cast<float>(magnitude_sq)));
-        }
+        record_trap<TRAP>(trap, period, scope, n + 1, static_cast<float>(zr.hi), static_cast<float>(zi.hi),
+                          static_cast<float>(magnitude_sq));
         if ((n & ABORT_CHECK_MASK) == ABORT_CHECK_MASK && abort()) {
             return {n, 0.0f, false, true};
         }
     }
-    return {iter_limit, 0.0f, true, false, trap};
+    return {iter_limit, 0.0f, true, false, trap, false, period};
 }
 
 /**
@@ -415,6 +432,7 @@ template <int TRAP, typename T, typename Abort>
 Escape iterate_perturbed(const float* orbit, int orbit_length, T dcr, T dci, int iter_limit, T epsilon,
                          T pixel_size, const Abort& abort) {
     float trap = INFINITY;
+    int period = 0;
     TrapScope<T> scope;
     T dzr = 0, dzi = 0;
     int m = 0;
@@ -423,7 +441,7 @@ Escape iterate_perturbed(const float* orbit, int orbit_length, T dcr, T dci, int
     int save_at = 8;
     const T max_compared_dz = epsilon * T(1e6);
     for (int n = 0; n < iter_limit; ++n) {
-        if (TRAP != Fractalis::TRAP_OFF) scope.step(orbit[2 * m] + dzr, orbit[2 * m + 1] + dzi, pixel_size);
+        if (TRAP != Fractalis::TRAP_OFF && TRAP != Fractalis::TRAP_PERIOD) scope.step(orbit[2 * m] + dzr, orbit[2 * m + 1] + dzi, pixel_size);
         T ar = T(2) * orbit[2 * m] + dzr;
         T ai = T(2) * orbit[2 * m + 1] + dzi;
         T nr = ar * dzr - ai * dzi + dcr;
@@ -434,12 +452,9 @@ Escape iterate_perturbed(const float* orbit, int orbit_length, T dcr, T dci, int
         T zi = orbit[2 * m + 1] + dzi;
         T magnitude_sq = zr * zr + zi * zi;
         if (magnitude_sq > static_cast<T>(BAILOUT_SQ)) {
-            return {n + 1, static_cast<float>(magnitude_sq), false, false, trap};
+            return {n + 1, static_cast<float>(magnitude_sq), false, false, trap, false, period};
         }
-        if (TRAP != Fractalis::TRAP_OFF && scope.counts(magnitude_sq)) {
-            trap = std::min(trap, trap_distance<TRAP>(static_cast<float>(zr), static_cast<float>(zi),
-                                                      static_cast<float>(magnitude_sq)));
-        }
+        record_trap<TRAP>(trap, period, scope, n + 1, static_cast<float>(zr), static_cast<float>(zi), magnitude_sq);
         if (magnitude_sq < dzr * dzr + dzi * dzi || m == orbit_length - 1) {
             dzr = zr;
             dzi = zi;
@@ -451,7 +466,7 @@ Escape iterate_perturbed(const float* orbit, int orbit_length, T dcr, T dci, int
         float ref_r = orbit[2 * m], ref_i = orbit[2 * m + 1];
         if (ref_r == saved_zr && ref_i == saved_zi && std::abs(dzr - saved_dzr) + std::abs(dzi - saved_dzi) < epsilon
                 && std::abs(dzr) + std::abs(dzi) < max_compared_dz) {
-            return {n + 1, 0.0f, true, false, trap, true};
+            return {n + 1, 0.0f, true, false, trap, true, period};
         }
         if (n == save_at) {
             saved_zr = ref_r;
@@ -461,7 +476,7 @@ Escape iterate_perturbed(const float* orbit, int orbit_length, T dcr, T dci, int
             save_at *= 2;
         }
     }
-    return {iter_limit, 0.0f, true, false, trap};
+    return {iter_limit, 0.0f, true, false, trap, false, period};
 }
 
 /**
@@ -478,6 +493,7 @@ KERNEL Escape iterate_perturbed_scaled(const float* orbit, int orbit_length, dou
     constexpr int SHIFT = 16;
     constexpr float UP = 0x1p16f, DOWN = 0x1p-16f;
     float trap = INFINITY;
+    int period = 0;
     TrapScope<double> scope;
     // e is a multiple of SHIFT, it starts where dc is around 1
     const int min_e = std::min(0, std::ilogb(pixel_size) / SHIFT * SHIFT) - 2 * SHIFT;
@@ -505,7 +521,7 @@ KERNEL Escape iterate_perturbed_scaled(const float* orbit, int orbit_length, dou
     int save_at = 8;
     for (int n = 0; n < iter_limit; ++n) {
         float big_zr = orbit[2 * m], big_zi = orbit[2 * m + 1];
-        if (TRAP != Fractalis::TRAP_OFF) scope.step(big_zr + wr * s_double, big_zi + wi * s_double, pixel_size);
+        if (TRAP != Fractalis::TRAP_OFF && TRAP != Fractalis::TRAP_PERIOD) scope.step(big_zr + wr * s_double, big_zi + wi * s_double, pixel_size);
         if (s == 0.0f && std::abs(big_zr) + std::abs(big_zi) <= tiny_step) {
             // dz is below the float range, but Z isn't much bigger (0 right after a rebase, or close to 0 near a deep
             // minibrot): dz^2 counts. This step in double.
@@ -528,11 +544,9 @@ KERNEL Escape iterate_perturbed_scaled(const float* orbit, int orbit_length, dou
         float zi = big_zi + wi * s;
         float magnitude_sq = zr * zr + zi * zi;
         if (magnitude_sq > static_cast<float>(BAILOUT_SQ)) {
-            return {n + 1, magnitude_sq, false, false, trap};
+            return {n + 1, magnitude_sq, false, false, trap, false, period};
         }
-        if (TRAP != Fractalis::TRAP_OFF && scope.counts(magnitude_sq)) {
-            trap = std::min(trap, trap_distance<TRAP>(zr, zi, magnitude_sq));
-        }
+        record_trap<TRAP>(trap, period, scope, n + 1, zr, zi, magnitude_sq);
 
         // Rebase
         if (m == orbit_length - 1) {
@@ -585,7 +599,7 @@ KERNEL Escape iterate_perturbed_scaled(const float* orbit, int orbit_length, dou
         float ref_r = orbit[2 * m], ref_i = orbit[2 * m + 1];
         if (ref_r == saved_zr && ref_i == saved_zi && e == saved_e
                 && std::abs(wr - saved_wr) + std::abs(wi - saved_wi) < epsilon && size < max_compared) {
-            return {n + 1, 0.0f, true, false, trap, true};
+            return {n + 1, 0.0f, true, false, trap, true, period};
         }
         if (n == save_at) {
             saved_zr = ref_r;
@@ -596,7 +610,7 @@ KERNEL Escape iterate_perturbed_scaled(const float* orbit, int orbit_length, dou
             save_at *= 2;
         }
     }
-    return {iter_limit, 0.0f, true, false, trap};
+    return {iter_limit, 0.0f, true, false, trap, false, period};
 }
 
 IN_RAM Escape iterate_perturbed_scaled_in_ram(const float* orbit, int orbit_length, double dcr, double dci,
@@ -939,7 +953,8 @@ bool Fractalis::calculate_pixel(int x, int y, const View& view, int iter_limit, 
 
     if (trapped) {
         // Color by the distance of the orbit to the trap, inside the set as well
-        uint32_t position = palette::trap_position(escape.trap);
+        uint32_t position = view.trap == TRAP_PERIOD ? palette::period_position(escape.period, escape.trap)
+                                                     : palette::trap_position(escape.trap);
         if (escape.in_set) {
             pixel.setInSetColored(position);
         } else {

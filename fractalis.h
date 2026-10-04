@@ -15,7 +15,8 @@
 class Fractalis {
 public:
     // Orbit trap shapes, see set_orbit_trap()
-    enum Trap : int { TRAP_OFF, TRAP_POINT, TRAP_CROSS, TRAP_RING, TRAP_COUNT };
+    // TRAP_PERIOD is the period map: colors by the period of the atom domain, the iteration where |z| came closest to 0
+    enum Trap : int { TRAP_OFF, TRAP_POINT, TRAP_CROSS, TRAP_RING, TRAP_PERIOD, TRAP_COUNT };
     // Iterations for the trap of pixels the interior checks found in the set without iterating
     static constexpr int TRAP_INTERIOR_ITER = 500;
 
@@ -56,7 +57,7 @@ public:
 
     /**
      * Orbit trap coloring: the color comes from how close the orbit gets to a shape (the origin, the axes or the
-     * unit circle), inside the set as well. Changing it recalculates the view.
+     * unit circle), inside the set as well, or the period map (TRAP_PERIOD). Changing it recalculates the view.
      */
     void set_orbit_trap(int trap);
     int orbit_trap() const { return trap_mode; }

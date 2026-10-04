@@ -23,6 +23,9 @@ constexpr int MAX_WIDTH = 320;  // of the screen
 uint32_t position(float smooth_iteration);
 // Orbit traps: palette position from the smallest squared distance of the orbit to the trap (log scale)
 uint32_t trap_position(float distance_sq);
+// Period map: a color per period (golden ratio steps along the palette), slightly shaded by how close the orbit came
+// to 0, so the relief light shows the shape of each domain
+uint32_t period_position(int period, float distance_sq);
 
 /**
  * Supersampling: the range of the sub-sample positions on a log scale in 3 bits. 1 = none, then factors of 8 up
