@@ -57,6 +57,7 @@ void draw_strip(uint16_t* strip, int first_row, int rows);
 void update_led();
 void handle_input();
 void help_calculating();
+bool input_pending();
 void initialize_rand();
 bool sample_buttons(repeating_timer_t*);
 
@@ -228,13 +229,16 @@ int main() {
         }
 
         // Without full quality, auto zoom doesn't wait for supersampling. The view is supersampled once it stops.
-        if (state.auto_zoom && !state.needs_redraw)
+        // It waits for a minibrot search, that may give it a target.
+        if (state.auto_zoom && !state.needs_redraw && !ui::searching())
             autoZoom.dive(now_ms());
         if (was_auto_zoom && !state.auto_zoom)
             fractalis.supersample();
         was_auto_zoom = state.auto_zoom;
 
-        if (calculating) {
+        if (ui::work(input_pending)) {
+            // Core0 searched a minibrot, core1 keeps calculating
+        } else if (calculating) {
             help_calculating();
         } else {
             sleep_ms(animating ? 1 : UPDATE_SLEEP);

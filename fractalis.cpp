@@ -233,12 +233,18 @@ bool find_minibrot(Fixed cr, Fixed ci, int period, Minibrot& out, const Interrup
     const Fixed c0r = cr, c0i = ci;
     double last_step = INFINITY;
     bool converged = false;
-    for (int step = 0; step < 12 && !converged; ++step) {
+    for (int step = 0; step < 20 && !converged; ++step) {
         if (interrupt()) return false;
         Fixed zr = 0.0, zi = 0.0;
         double zrd = 0, zid = 0;
         double dr = 0, di = 0;  // dz/dc
+        double lr = 1, li = 0;  // l, see below
         for (int i = 0; i < period; ++i) {
+            if (i >= 1) {
+                double nlr = 2 * (lr * zrd - li * zid);
+                li = 2 * (lr * zid + li * zrd);
+                lr = nlr;
+            }
             double ndr = 2 * (zrd * dr - zid * di) + 1;
             di = 2 * (zrd * di + zid * dr);
             dr = ndr;
@@ -254,8 +260,9 @@ bool find_minibrot(Fixed cr, Fixed ci, int period, Minibrot& out, const Interrup
         if (!(std::abs(sr) + std::abs(si) < 1.0)) return false;
         cr -= Fixed(sr);
         ci -= Fixed(si);
-        // |z_period| relative to the size of the minibrot ~ 1 / |dz/dc|
-        double step_size = std::sqrt((sr * sr + si * si) * d);
+        // The step relative to the size of the minibrot: 1 / size = |b l^2| ~ |dz/dc| |l| near the nucleus. Deep
+        // minibrots have a huge l, |z_period| alone would stop far too early.
+        double step_size = std::sqrt((sr * sr + si * si) * d * (lr * lr + li * li));
         converged = step_size < 1e-6;
         // Stuck at the precision limit or diverging
         if (!converged && step_size > last_step * 0.5 && step > 2) break;
@@ -476,7 +483,7 @@ KERNEL Escape iterate_perturbed_scaled(const float* orbit, int orbit_length, dou
     const int min_e = std::min(0, std::ilogb(pixel_size) / SHIFT * SHIFT) - 2 * SHIFT;
     int e = min_e + 2 * SHIFT;
     float wr = 0, wi = 0;
-    float s, dr, di, tiny_z, epsilon, max_compared;
+    float s, dr, di, tiny_z, tiny_step, epsilon, max_compared;
     double s_double;
     auto set_scale = [&]() {
         s_double = std::ldexp(1.0, e);
@@ -486,6 +493,8 @@ KERNEL Escape iterate_perturbed_scaled(const float* orbit, int orbit_length, dou
         di = static_cast<float>(dci * scale);
         // Rebasing (|z| < |dz|) is only possible where |Z| < 2 |dz| < 2^(e + SHIFT + 1)
         tiny_z = e + SHIFT + 1 >= -126 ? std::ldexp(1.0f, e + SHIFT + 1) : 0.0f;
+        // Where s is 0, dz^2 still counts next to 2 Z dz while |Z| < 2^24 |dz|
+        tiny_step = e + SHIFT + 25 >= -126 ? std::ldexp(1.0f, e + SHIFT + 25) : 0.0f;
         epsilon = static_cast<float>(pixel_size * 1e-3 * scale);
         max_compared = epsilon * 1e6f;
     };
@@ -497,11 +506,21 @@ KERNEL Escape iterate_perturbed_scaled(const float* orbit, int orbit_length, dou
     for (int n = 0; n < iter_limit; ++n) {
         float big_zr = orbit[2 * m], big_zi = orbit[2 * m + 1];
         if (TRAP != Fractalis::TRAP_OFF) scope.step(big_zr + wr * s_double, big_zi + wi * s_double, pixel_size);
-        float ar = 2.0f * big_zr + wr * s;
-        float ai = 2.0f * big_zi + wi * s;
-        float nr = ar * wr - ai * wi + dr;
-        wi = ar * wi + ai * wr + di;
-        wr = nr;
+        if (s == 0.0f && std::abs(big_zr) + std::abs(big_zi) <= tiny_step) {
+            // dz is below the float range, but Z isn't much bigger (0 right after a rebase, or close to 0 near a deep
+            // minibrot): dz^2 counts. This step in double.
+            const double zr = wr * s_double, zi = wi * s_double;
+            const double ar = 2.0 * big_zr + zr, ai = 2.0 * big_zi + zi;
+            const double nr = (ar * zr - ai * zi + dcr) / s_double;
+            wi = static_cast<float>((ar * zi + ai * zr + dci) / s_double);
+            wr = static_cast<float>(nr);
+        } else {
+            float ar = 2.0f * big_zr + wr * s;
+            float ai = 2.0f * big_zi + wi * s;
+            float nr = ar * wr - ai * wi + dr;
+            wi = ar * wi + ai * wr + di;
+            wr = nr;
+        }
         m++;
         big_zr = orbit[2 * m];
         big_zi = orbit[2 * m + 1];
@@ -1838,6 +1857,26 @@ void Fractalis::pan(double dx, double dy) {
     state->center.imag = clamp_coordinate(state->center.imag + step.times(shift_y));
     state->shiftPixelState(-shift_x, -shift_y);
     first_limit_hint = estimate_first_limit();
+    request_calculation();
+}
+
+void Fractalis::move_to(const Coordinate& center) {
+    LockGuard guard(lock);
+    const double step = 4.0 / state->zoom_factor / state->screen_w;
+    const double dx = (center.real - state->center.real).to_double() / step;
+    const double dy = (center.imag - state->center.imag).to_double() / step;
+    state->center = {clamp_coordinate(center.real), clamp_coordinate(center.imag)};
+    if (std::abs(dx) < state->screen_w && std::abs(dy) < state->screen_h) {
+        // Moved by the nearest whole pixels, the rest is a fraction of a pixel: every pixel is calculated again
+        state->shiftPixelState(-static_cast<int>(std::lround(dx)), -static_cast<int>(std::lround(dy)));
+        for (int y = 0; y < state->screen_h; ++y) {
+            for (int x = 0; x < state->screen_w; ++x) state->pixelState[y][x].markIncomplete();
+        }
+        first_limit_hint = estimate_first_limit();
+    } else {
+        state->resetPixelComplete();
+        first_limit_hint = 0;
+    }
     request_calculation();
 }
 

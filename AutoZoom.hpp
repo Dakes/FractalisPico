@@ -33,6 +33,13 @@ public:
     uint32_t seconds_to_next_step(uint32_t now_ms) const;
     // Call when auto zoom gets switched on. It continues from the current view.
     void start();
+    /**
+     * A target, e.g. a minibrot found at the center: auto zoom then zooms straight in (or out) to this zoom and
+     * stops there. Only while the view stays at this center.
+     */
+    void set_target(const Coordinate& center, double zoom);
+    bool has_target() const;
+    double target_zoom() const { return target_zoom_; }
     std::pair<int, int> identifyCenterOfTileOfDetail(int& detail_score);
     // Pans towards the target, so that it gets closer to the center with every zoom step
     void initiatePan(int x, int y, double zoom_factor);
@@ -44,6 +51,9 @@ private:
     uint32_t next_step_ms;
     int speed;
     int pause;
+    bool target_set = false;
+    Coordinate target_center;
+    double target_zoom_ = 0;
 
     struct Pause {
         const char* name;

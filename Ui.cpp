@@ -1,11 +1,13 @@
 #include "Ui.hpp"
 #include "Menu.hpp"
+#include "MinibrotFinder.hpp"
 #include "globals.h"
 #include "libraries/pico_graphics/pico_graphics.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
+#include <complex>
 #include <cstring>
 
 using namespace pimoroni;
@@ -108,13 +110,25 @@ Settings saved;  // what is in the flash
 char toast_text[40];
 uint32_t toast_until = 0;
 
+void show_toast(uint32_t duration_ms, const char* format, va_list args) {
+    vsnprintf(toast_text, sizeof(toast_text), format, args);
+    toast_until = now_ms() + duration_ms;
+    state.needs_redraw = true;
+}
+
 void toast(const char* format, ...) {
     va_list args;
     va_start(args, format);
-    vsnprintf(toast_text, sizeof(toast_text), format, args);
+    show_toast(TOAST_MS, format, args);
     va_end(args);
-    toast_until = now_ms() + TOAST_MS;
-    state.needs_redraw = true;
+}
+
+// For messages with more to read
+void long_toast(const char* format, ...) {
+    va_list args;
+    va_start(args, format);
+    show_toast(3 * TOAST_MS, format, args);
+    va_end(args);
 }
 
 bool toast_active(uint32_t now) {
@@ -124,6 +138,17 @@ bool toast_active(uint32_t now) {
 // Short, for the rows of the menu
 void format_zoom(char* out, int size, double zoom) {
     snprintf(out, size, "x%.3g", zoom);
+}
+
+// Large zooms like x2.1e40
+void format_deep_zoom(char* out, int size, double zoom) {
+    int exponent = static_cast<int>(std::floor(std::log10(zoom)));
+    double mantissa = zoom / std::pow(10.0, exponent);
+    if (mantissa >= 9.95) {
+        mantissa /= 10;
+        exponent++;
+    }
+    snprintf(out, size, "x%.1fe%d", mantissa, exponent);
 }
 
 // ---- Views: the way back, places, saved views ----
@@ -153,6 +178,103 @@ void remember_view() {
 void jump(const Coordinate& center, double zoom) {
     remember_view();
     fractalis.set_view(center, zoom);
+}
+
+// ---- Minibrot finder ----
+
+MinibrotFinder finder;
+uint32_t search_started_ms = 0;
+uint32_t search_seconds = 0;  // shown in the message
+int target_period = 0;        // of the minibrot auto zoom dives to
+
+// The menu offers x1e10 to x1e70
+constexpr int FINDER_DEPTHS = 7;
+double finder_depth(int i) {
+    return std::pow(10.0, 10 * (i + 1));
+}
+
+/**
+ * Points outside of the set to search from: the screen center, then from rings around it the escaped pixel closest
+ * to the set (highest palette position). Inside the set it can't start.
+ */
+int search_starts(Coordinate* out) {
+    const int w = state.screen_w, h = state.screen_h;
+    auto outside = [&](int x, int y) { return state.pixelState[y][x].hasPosition(); };
+    int count = 0;
+    const bool center_outside = outside(w / 2 - 1, h / 2 - 1) || outside(w / 2, h / 2 - 1)
+                             || outside(w / 2 - 1, h / 2) || outside(w / 2, h / 2);
+    if (center_outside) out[count++] = state.center;
+    constexpr int RINGS = 4;
+    constexpr int RING_START[RINGS + 1] = {0, 6, 20, 60, 400};  // distance from the center, in pixels
+    struct Best {
+        int x = -1, y = -1;
+        uint32_t position = 0;
+    } best[RINGS];
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            if (!outside(x, y)) continue;
+            const int dx = 2 * x + 1 - w, dy = 2 * y + 1 - h;  // in half pixels
+            const int d2 = (dx * dx + dy * dy) / 4;
+            int ring = 0;
+            while (ring < RINGS && d2 >= RING_START[ring + 1] * RING_START[ring + 1]) ring++;
+            if (ring == RINGS || (ring == 0 && center_outside)) continue;
+            uint32_t position = state.pixelState[y][x].position();
+            if (best[ring].x < 0 || position > best[ring].position) best[ring] = {x, y, position};
+        }
+    }
+    // The pixel centers, like Fractalis::choose_reference()
+    const Fixed half_step(2.0 / state.zoom_factor / w);
+    for (int i = 0; i < RINGS && count < MinibrotFinder::MAX_STARTS; ++i) {
+        if (best[i].x < 0) continue;
+        Coordinate c = state.center;
+        c.real += half_step.times(2 * best[i].x + 1 - w);
+        c.imag += half_step.times(2 * best[i].y + 1 - h);
+        out[count++] = c;
+    }
+    return count;
+}
+
+void find_minibrot(int depth) {
+    Coordinate starts[MinibrotFinder::MAX_STARTS];
+    const int count = search_starts(starts);
+    if (count == 0) {
+        toast("Nothing but the set in view");
+        show_led_feedback(255, 0, 0, 300);
+        return;
+    }
+    finder.start(starts, count, finder_depth(depth));
+    search_started_ms = now_ms();
+    search_seconds = 0;
+    toast("Looking for a minibrot...");
+}
+
+// Moves there, auto zoom gets it as target
+void search_done() {
+    const uint32_t ms = now_ms() - search_started_ms;
+    if (!finder.found()) {
+        printf("No minibrot found after %lu iterations, %lu ms\n", static_cast<unsigned long>(finder.iterations()),
+               static_cast<unsigned long>(ms));
+        char zoom_text[16];
+        format_deep_zoom(zoom_text, sizeof(zoom_text), finder.target());
+        long_toast("No minibrot at %s found here", zoom_text);
+        show_led_feedback(255, 0, 0, 300);
+        return;
+    }
+    const MinibrotFinder::Result& r = finder.result();
+    // Framed like the whole set at zoom 1, centered at -0.5 in its coordinates
+    const std::complex<double> offset = -0.5 / r.scale;
+    const Coordinate center = {r.nucleus.real + Fixed(offset.real()), r.nucleus.imag + Fixed(offset.imag())};
+    remember_view();
+    fractalis.move_to(center);
+    autoZoom.set_target(state.center, r.zoom());
+    target_period = r.period;
+    char zoom_text[16];
+    format_deep_zoom(zoom_text, sizeof(zoom_text), r.zoom());
+    printf("Minibrot of period %d at zoom %.3e (target %.0e) after %lu iterations, %d probes, %lu ms\n", r.period,
+           r.zoom(), finder.target(), static_cast<unsigned long>(finder.iterations()), finder.probes(),
+           static_cast<unsigned long>(ms));
+    long_toast("Minibrot at %s, period %d", zoom_text, r.period);
+    show_led_feedback(255, 255, 255, 300);
 }
 
 /**
@@ -429,6 +551,24 @@ const menu::Icon ICON_PIN = {{
     "................",
     "................",
 }};
+const menu::Icon ICON_FINDER = {{
+    "....#####.......",
+    "..##.....##.....",
+    ".#.........#....",
+    ".#......+..#....",
+    "#.....+###..#...",
+    "#.++######+.#...",
+    "#.....+###..#...",
+    ".#......+..#....",
+    ".#.........#....",
+    "..##.....###....",
+    "....#####.###...",
+    "...........###..",
+    "............###.",
+    ".............###",
+    "..............#.",
+    "................",
+}};
 const menu::Icon ICON_BARS = {{
     "................",
     "............###.",
@@ -550,7 +690,9 @@ int two(int) { return 2; }
 const char* set_display_text(int, int option, char*, int) { return option == 0 ? "shrinking" : "preview"; }
 
 // Auto zoom
-const char* auto_zoom_label(int, char*, int) { return state.auto_zoom ? "Stop auto zoom" : "Start auto zoom"; }
+const char* auto_zoom_label(int, char*, int) {
+    return state.auto_zoom ? "Stop auto zoom" : autoZoom.has_target() ? "Dive to the minibrot" : "Start auto zoom";
+}
 void auto_zoom_run(int) { set_auto_zoom(!state.auto_zoom); }
 
 int step_get(int) { return autoZoom.speed_index(); }
@@ -592,6 +734,24 @@ const char* place_text(int i, int, char* buffer, int size) {
 void place_run(int i) {
     jump({Fixed::parse(PLACES[i].real), Fixed::parse(PLACES[i].imag)}, PLACES[i].zoom);
 }
+
+const char* depth_label(int i, char* buffer, int size) {
+    snprintf(buffer, size, "x1e%d", 10 * (i + 1));
+    return buffer;
+}
+// Not shallower than the current view
+bool depth_enabled(int i) { return finder_depth(i) > state.zoom_factor; }
+// A gauge from zoom 1 to the precision limit (log scale): filled down to the depth, a mark at the current zoom
+void depth_decor(int i, int, const Box& box) {
+    if (!menu::visible(box)) return;
+    const double full = std::log10(PRECISION_MAX_ZOOM);
+    const int x = box.x + 2, w = box.w - 4, y = box.y + box.h / 2 - 2;
+    menu::round_rect({x, y, w, 5}, 2, {62, 64, 84});
+    menu::round_rect({x, y, static_cast<int>(w * 10 * (i + 1) / full + 0.5), 5}, 2, menu::color());
+    const double here = std::log10(std::max(1.0, state.zoom_factor)) / full;
+    menu::fill({x + static_cast<int>(w * std::min(here, 1.0)), y - 3, 2, 11}, {255, 255, 255});
+}
+void depth_run(int i) { find_minibrot(i); }
 
 void slot_run(int slot) { go_to_slot(slot); }
 void slot_hold(int slot) { store_in_slot(slot); }
@@ -736,6 +896,14 @@ constexpr menu::Item PLACE_ITEMS[] = {place(0), place(1), place(2), place(3), pl
 static_assert(sizeof(PLACE_ITEMS) / sizeof(PLACE_ITEMS[0]) == PLACE_COUNT, "a row for every place");
 constexpr menu::Page PLACES_PAGE = {"Places", &ICON_PIN, VIEWS_COLOR, PLACE_ITEMS, PLACE_COUNT};
 
+constexpr menu::Item depth(int i) {
+    return menu::action(nullptr, depth_run, "Centers a minibrot that fills the screen at this zoom")
+        .with_label(depth_label).with_param(i).when(depth_enabled).decorated(depth_decor, 60).closing();
+}
+constexpr menu::Item FINDER_ITEMS[] = {depth(0), depth(1), depth(2), depth(3), depth(4), depth(5), depth(6)};
+static_assert(sizeof(FINDER_ITEMS) / sizeof(FINDER_ITEMS[0]) == FINDER_DEPTHS, "a row for every depth");
+constexpr menu::Page FINDER_PAGE = {"Minibrots", &ICON_FINDER, VIEWS_COLOR, FINDER_ITEMS, FINDER_DEPTHS};
+
 constexpr menu::Item COLORS_ITEMS[] = {
     menu::choice("Palette", palette_get, palette_set, palette_count, palette_text, "The colors of the image")
         .live().decorated(palette_decor, 36),
@@ -793,9 +961,10 @@ constexpr menu::Item VIEWS_ITEMS[] = {
         .when(has_history).closing(),
     menu::action("Reset view", reset_view, "Back to the whole set").closing(),
     menu::page("Places", PLACES_PAGE, "Famous spots and deep zoom tests"),
+    menu::page("Minibrots", FINDER_PAGE, "Finds one at the zoom you choose, auto zoom dives there"),
     slot(0), slot(1), slot(2), slot(3), slot(4), slot(5), slot(6), slot(7), slot(8), slot(9),
 };
-static_assert(sizeof(VIEWS_ITEMS) / sizeof(VIEWS_ITEMS[0]) == 3 + settings::VIEW_SLOTS, "a row for every slot");
+static_assert(sizeof(VIEWS_ITEMS) / sizeof(VIEWS_ITEMS[0]) == 4 + settings::VIEW_SLOTS, "a row for every slot");
 constexpr menu::Page VIEWS_PAGE = {"Views", &ICON_BOOKMARK, VIEWS_COLOR, VIEWS_ITEMS,
                                    sizeof(VIEWS_ITEMS) / sizeof(VIEWS_ITEMS[0])};
 
@@ -813,7 +982,7 @@ constexpr menu::Item MAIN_ITEMS[] = {
     menu::page("Light", LIGHT_PAGE, "Relief shading and where the light comes from"),
     menu::page("Rendering", RENDERING_PAGE, "Supersampling and how the image builds up"),
     menu::page("Auto zoom", AUTO_ZOOM_PAGE, "Dives on its own into the most detailed area"),
-    menu::page("Views", VIEWS_PAGE, "Saved views, places and the way back"),
+    menu::page("Views", VIEWS_PAGE, "Saved views, places, minibrots and the way back"),
     menu::page("System", SYSTEM_PAGE, "Info overlay, saving and statistics"),
 };
 constexpr menu::Page MAIN_PAGE = {"Fractalis", &ICON_MANDELBROT, {225, 226, 240}, MAIN_ITEMS,
@@ -864,7 +1033,8 @@ void quick(int button) {
             break;
         case 3:
             set_auto_zoom(!state.auto_zoom);
-            toast("%s", state.auto_zoom ? "Auto zoom on" : "Auto zoom off");
+            toast("%s", !state.auto_zoom ? "Auto zoom off"
+                        : autoZoom.has_target() ? "Diving to the minibrot" : "Auto zoom on");
             break;
     }
     show_led_feedback(255, 255, 255, 80);
@@ -961,6 +1131,14 @@ void render_overlay(PicoGraphics& g, uint32_t now) {
              precision_name());
     add_text(g, iterations_text, Point(margin, info_y));
 
+    if (autoZoom.has_target()) {
+        info_y += font8_height + margin;
+        char zoom_text[16], target_text[48];
+        format_deep_zoom(zoom_text, sizeof(zoom_text), autoZoom.target_zoom());
+        snprintf(target_text, sizeof(target_text), "Minibrot at %s, period %d", zoom_text, target_period);
+        add_text(g, target_text, Point(margin, info_y));
+    }
+
     if (state.auto_zoom) {
         info_y += font8_height + margin;
         char auto_zoom_text[40];
@@ -1046,6 +1224,13 @@ void handle(Input input, int button) {
     last_input_ms = now_ms();
     state.needs_redraw = true;
     const bool was_open = menu::is_open();
+    // Moving the view stops a minibrot search (the menu doesn't)
+    if (finder.busy() && !was_open
+            && (input == Input::PRESS || input == Input::LONG || input == Input::REPEAT || input == Input::QUICK)) {
+        finder.stop();
+        toast("Search stopped");
+        return;
+    }
     switch (input) {
         case Input::PRESS:
         case Input::LONG:
@@ -1095,6 +1280,12 @@ bool update(uint32_t now, uint32_t elapsed_ms) {
         state.needs_redraw = true;
     }
 
+    // The search shows that it's still busy, every second
+    if (finder.busy() && (now - search_started_ms) / 1000 != search_seconds) {
+        search_seconds = (now - search_started_ms) / 1000;
+        long_toast("Looking for a minibrot... %lu s", static_cast<unsigned long>(search_seconds));
+    }
+
     // Draws the picture of a slot again once its view is done
     if (pending_thumbnail.slot >= 0) {
         if (state.calculation_id != pending_thumbnail.calculation) {
@@ -1136,6 +1327,20 @@ bool update(uint32_t now, uint32_t elapsed_ms) {
     return animating;
 }
 
+bool work(bool (*interrupt)()) {
+    if (!finder.busy()) return false;
+    const uint32_t until = now_ms() + CORE0_WORK_MS;
+    while (finder.busy() && static_cast<int32_t>(until - now_ms()) > 0 && !(interrupt && interrupt())) {
+        finder.work(256);
+    }
+    if (!finder.busy()) search_done();
+    return true;
+}
+
+bool searching() {
+    return finder.busy();
+}
+
 bool overlay_wanted() {
     const uint32_t now = now_ms();
     return menu::is_open() || quick_shown || hud_visible(now) || toast_active(now);
@@ -1147,6 +1352,8 @@ void led_color(uint8_t& r, uint8_t& g, uint8_t& b) {
         c = menu::color();
     else if (quick_shown)
         c = {200, 0, 255};
+    else if (finder.busy())
+        c = {255, 60, 160};
     else if (state.calculating)
         c = {255, 150, 0};
     else if (state.auto_zoom)

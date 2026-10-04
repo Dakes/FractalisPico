@@ -67,6 +67,13 @@ void led_color(uint8_t& r, uint8_t& g, uint8_t& b);
 void prepare_frame(pimoroni::PicoGraphics& g);
 // Draws the overlay into a strip of the image (display byte order)
 void draw_strip(pimoroni::PicoGraphics& g, uint16_t* strip, int first_row, int rows);
+/**
+ * Work for core0 instead of helping to calculate the image: the minibrot search, a slice of it. Returns false if
+ * there is none. interrupt: stops the slice early (a button was pressed).
+ */
+bool work(bool (*interrupt)());
+// A minibrot search is running
+bool searching();
 
 /**
  * Prints a coordinate with the given number of decimals (cut off, not rounded), exactly: printf only knows double,

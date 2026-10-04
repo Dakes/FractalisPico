@@ -42,6 +42,8 @@ public:
     void reset_view();
     // Jumps to the view, e.g. a saved one
     void set_view(const Coordinate& center, double zoom);
+    // Moves the center there, by any amount. Close by, the image stays as a preview while it is calculated again.
+    void move_to(const Coordinate& center);
 
     /**
      * Supersampling: once a view is calculated, every pixel gets samples - 1 more sub-samples. 1 (off), 2, 3, 4, 6

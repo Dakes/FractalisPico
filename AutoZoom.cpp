@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 
 const AutoZoom::Speed AutoZoom::SPEEDS[] = {
     {"x1.05", 1.05, 500, 1.0f},
@@ -33,8 +34,18 @@ static double zoom_out_change(double factor) { return 1.0 / factor - 1.0; }
 
 void AutoZoom::start() {
     // A random first step only from the overview, otherwise every dive would look the same
-    randomized_start = state->zoom_factor >= 2.0;
+    randomized_start = state->zoom_factor >= 2.0 || has_target();
     next_step_ms = 0;
+}
+
+void AutoZoom::set_target(const Coordinate& center, double zoom) {
+    target_set = true;
+    target_center = center;
+    target_zoom_ = zoom;
+}
+
+bool AutoZoom::has_target() const {
+    return target_set && std::memcmp(&target_center, &state->center, sizeof(Coordinate)) == 0;
 }
 
 void AutoZoom::set_speed(int index) {
@@ -87,6 +98,23 @@ void AutoZoom::dive(uint32_t now_ms) {
         return;
     }
     next_step_ms = 0;
+
+    if (has_target()) {
+        // Straight there, the last step exactly to the target. It stops auto zoom right away, so the view there
+        // gets the full quality (refined and supersampled).
+        double ratio = target_zoom_ / state->zoom_factor;
+        bool last = ratio <= s.zoom_factor && ratio >= 1.0 / s.zoom_factor;
+        double change = last ? ratio : ratio > 1.0 ? s.zoom_factor : 1.0 / s.zoom_factor;
+        if (std::abs(change - 1.0) > 1e-9) fractalis->zoom(change - 1.0);
+        if (last) {
+            printf("Auto zoom reached the target, stopping\n");
+            target_set = false;
+            state->auto_zoom = false;
+            state->needs_redraw = true;
+        }
+        return;
+    }
+    target_set = false;  // the view moved away from it
 
     if (state->zoom_factor >= MAX_ZOOM) {
         printf("Auto zoom reached max zoom, stopping\n");

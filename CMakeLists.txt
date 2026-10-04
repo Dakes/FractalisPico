@@ -58,6 +58,7 @@ add_executable(${NAME}
     Settings.cpp
     Menu.cpp
     Ui.cpp
+    MinibrotFinder.cpp
 )
 
 # Include required libraries
