@@ -16,7 +16,10 @@ class Fractalis {
 public:
     // Orbit trap shapes, see set_orbit_trap()
     // TRAP_PERIOD is the period map: colors by the period of the atom domain, the iteration where |z| came closest to 0
-    enum Trap : int { TRAP_OFF, TRAP_POINT, TRAP_CROSS, TRAP_RING, TRAP_PERIOD, TRAP_COUNT };
+    // TRAP_STRIPE is stripe average coloring: the average of sin(4 * angle of z) over the orbit
+    enum Trap : int { TRAP_OFF, TRAP_POINT, TRAP_CROSS, TRAP_RING, TRAP_PERIOD, TRAP_STRIPE, TRAP_COUNT };
+    // Where the trap colors: the rest gets the usual coloring (smooth iteration count outside, black inside)
+    enum TrapRegion : int { REGION_EVERYWHERE, REGION_INSIDE, REGION_OUTSIDE, REGION_COUNT };
     // Iterations for the trap of pixels the interior checks found in the set without iterating
     static constexpr int TRAP_INTERIOR_ITER = 500;
 
@@ -59,8 +62,10 @@ public:
      * Orbit trap coloring: the color comes from how close the orbit gets to a shape (the origin, the axes or the
      * unit circle), inside the set as well, or the period map (TRAP_PERIOD). Changing it recalculates the view.
      */
-    void set_orbit_trap(int trap);
+    void set_orbit_trap(int trap) { set_orbit_trap(trap, trap_region); }
+    void set_orbit_trap(int trap, int region);
     int orbit_trap() const { return trap_mode; }
+    int orbit_trap_region() const { return trap_region; }
 
     /**
      * Supersampling right away: every pixel gets all of its sub-samples in every pass, the probes as well. No
@@ -128,6 +133,7 @@ private:
         // Everything this close to the reference is in the set (0 = unknown)
         double interior_radius_sq = 0;
         int trap = TRAP_OFF;
+        int trap_region = REGION_EVERYWHERE;
         // Series approximation: dz at iteration series_skip = sum series[k] dc^(k+1), the pixels start there
         int series_skip = 0;
         double series_r[4] = {}, series_i[4] = {};
@@ -266,6 +272,7 @@ private:
     bool extend_reference(uint32_t id, int target_length, bool (*interrupt)());
 
     int trap_mode = TRAP_OFF;
+    int trap_region = REGION_EVERYWHERE;
     bool ss_right_away = false;
     bool show_probes_ = false;
     bool undecided_in_set_ = UNDECIDED_IN_SET;

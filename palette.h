@@ -26,6 +26,9 @@ uint32_t trap_position(float distance_sq);
 // Period map: a color per period (golden ratio steps along the palette), slightly shaded by how close the orbit came
 // to 0, so the relief light shows the shape of each domain
 uint32_t period_position(int period, float distance_sq);
+// Stripe average coloring: sum and packed count / last term from the iteration (see record_trap() in fractalis.cpp),
+// blend 0-1 between the average without and with the last term
+uint32_t stripe_position(float sum, int packed, float blend);
 
 /**
  * Supersampling: the range of the sub-sample positions on a log scale in 3 bits. 1 = none, then factors of 8 up
@@ -74,6 +77,8 @@ public:
     bool animate();
 
     bool shading = true;
+    // Edge glow: lighter where the colors change fast from pixel to pixel, thin bright outlines along the filaments
+    bool edges = false;
     /**
      * Direction the relief light comes from, in radians: 0 = from the right, pi / 2 = from the bottom (screen
      * coordinates). Starts at the top left.

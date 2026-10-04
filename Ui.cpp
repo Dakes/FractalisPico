@@ -71,8 +71,18 @@ constexpr float LIGHT_ROTATION_SPEED = 2.0f * PI / 12.0f;  // radians per second
 int light = 0;
 float light_angle = LIGHT_ANGLES[0];
 
-const char* const TRAP_NAMES[] = {"off", "point", "cross", "ring", "period"};
+const char* const TRAP_NAMES[] = {"off", "point", "cross", "ring", "period", "stripes"};
 static_assert(sizeof(TRAP_NAMES) / sizeof(TRAP_NAMES[0]) == Fractalis::TRAP_COUNT, "a name for every trap");
+const char* const REGION_NAMES[] = {"everywhere", "inside", "outside"};
+static_assert(sizeof(REGION_NAMES) / sizeof(REGION_NAMES[0]) == Fractalis::REGION_COUNT, "a name for every region");
+
+// Saved as one byte: the trap in the low 4 bit, where it colors above (0 = everywhere, as older records have it)
+uint8_t trap_byte() {
+    return static_cast<uint8_t>(fractalis.orbit_trap() | (fractalis.orbit_trap_region() << 4));
+}
+void apply_trap_byte(uint8_t b) {
+    fractalis.set_orbit_trap(b & 15, b >> 4);
+}
 
 constexpr int SUPERSAMPLING[] = {1, 2, 3, 4, 6, 8};
 constexpr int SUPERSAMPLING_COUNT = sizeof(SUPERSAMPLING) / sizeof(SUPERSAMPLING[0]);
@@ -377,7 +387,7 @@ bool store_current_view(int slot) {
     v.has_look = 1;
     v.palette = static_cast<uint8_t>(color_palette.index());
     v.bands = BANDS[bands].id;
-    v.orbit_trap = static_cast<uint8_t>(fractalis.orbit_trap());
+    v.orbit_trap = trap_byte();
     v.shading = color_palette.shading;
     v.light = static_cast<uint8_t>(light);
     if (!settings::store_view(slot, v, draw_thumbnail)) return false;
@@ -396,7 +406,7 @@ void go_to_slot(int slot) {
     if (v.has_look) {
         color_palette.select(v.palette);
         set_bands_id(v.bands);
-        fractalis.set_orbit_trap(v.orbit_trap);
+        apply_trap_byte(v.orbit_trap);
         color_palette.shading = v.shading;
         set_light(v.light);
     }
@@ -505,7 +515,7 @@ int view_line(char* out, int size, const char* name, const settings::View& v) {
         put_name(palette_text, sizeof(palette_text), palette::name(v.palette));
         put_name(light_text, sizeof(light_text), LIGHT_NAMES[v.light % LIGHT_COUNT]);
         n += snprintf(out + n, size - n, " palette %s bands %s trap %s shading %s light %s", palette_text,
-                      bands_name(v.bands), TRAP_NAMES[v.orbit_trap % Fractalis::TRAP_COUNT],
+                      bands_name(v.bands), TRAP_NAMES[(v.orbit_trap & 15) % Fractalis::TRAP_COUNT],
                       v.shading ? "on" : "off", light_text);
     }
     return std::min(n, size - 1);
@@ -518,7 +528,7 @@ settings::View current_view() {
     v.has_look = 1;
     v.palette = static_cast<uint8_t>(color_palette.index());
     v.bands = BANDS[bands].id;
-    v.orbit_trap = static_cast<uint8_t>(fractalis.orbit_trap());
+    v.orbit_trap = trap_byte();
     v.shading = color_palette.shading;
     v.light = static_cast<uint8_t>(light);
     return v;
@@ -672,7 +682,7 @@ void usb_import() {
         if (v.has_look) {
             color_palette.select(v.palette);
             set_bands_id(v.bands);
-            fractalis.set_orbit_trap(v.orbit_trap);
+            apply_trap_byte(v.orbit_trap);
             color_palette.shading = v.shading;
             set_light(v.light);
         }
@@ -1289,6 +1299,10 @@ int cycle_speed_count(int) { return CYCLE_SPEED_COUNT; }
 const char* cycle_speed_text(int, int option, char*, int) { return CYCLE_SPEEDS[option].name; }
 
 int trap_get(int) { return fractalis.orbit_trap(); }
+int region_get(int) { return fractalis.orbit_trap_region(); }
+void region_set(int, int v) { fractalis.set_orbit_trap(fractalis.orbit_trap(), v); }
+int region_count(int) { return Fractalis::REGION_COUNT; }
+const char* region_text(int, int option, char*, int) { return REGION_NAMES[option]; }
 void trap_set(int, int v) { fractalis.set_orbit_trap(v); }
 int trap_count(int) { return Fractalis::TRAP_COUNT; }
 const char* trap_text(int, int option, char*, int) { return names(TRAP_NAMES, option); }
@@ -1311,11 +1325,16 @@ void trap_decor(int, int option, const Box& box) {
             menu::disc(cx + 1.5f, cy, 1.8f, LIGHT_TEXT);
             menu::disc(cx + 4.5f, cy, 1.0f, LIGHT_TEXT);
             break;
+        case Fractalis::TRAP_STRIPE:
+            for (int k = -1; k <= 1; ++k) menu::fill({box.x + box.w / 2 - 5, box.y + box.h / 2 + 3 * k, 11, 1}, LIGHT_TEXT);
+            break;
     }
 }
 
 // Light
 int shading_get(int) { return color_palette.shading; }
+int edges_get(int) { return color_palette.edges; }
+void edges_set(int, int v) { color_palette.edges = v != 0; }
 void shading_set(int, int v) { color_palette.shading = v != 0; }
 
 int light_get(int) { return light; }
@@ -1456,8 +1475,8 @@ void slot_row(int slot, int selected, const Box& box) {
         format_zoom(text, sizeof(text), v.zoom);
         menu::text(text, tx, box.y + 22, menu::SOFT_TEXT);
         if (v.has_look) {
-            snprintf(text, sizeof(text), "%s%s%s", palette::name(v.palette), v.orbit_trap ? ", " : "",
-                     v.orbit_trap ? TRAP_NAMES[v.orbit_trap % Fractalis::TRAP_COUNT] : "");
+            snprintf(text, sizeof(text), "%s%s%s", palette::name(v.palette), (v.orbit_trap & 15) ? ", " : "",
+                     (v.orbit_trap & 15) ? TRAP_NAMES[(v.orbit_trap & 15) % Fractalis::TRAP_COUNT] : "");
             menu::text(text, tx, box.y + 35, menu::SOFT_TEXT);
         }
     } else {
@@ -1590,12 +1609,15 @@ constexpr menu::Item COLORS_ITEMS[] = {
                  "Time for one round through the palette").live(),
     menu::choice("Orbit trap", trap_get, trap_set, trap_count, trap_text,
                  "Colors by how close the orbit comes to a shape").decorated(trap_decor, 12),
+    menu::choice("Trap colors", region_get, region_set, region_count, region_text,
+                 "Where the orbit trap colors, the rest is colored as usual"),
 };
 constexpr menu::Page COLORS_PAGE = {"Colors", &ICON_PALETTE, COLORS_COLOR, COLORS_ITEMS,
                                     sizeof(COLORS_ITEMS) / sizeof(COLORS_ITEMS[0])};
 
 constexpr menu::Item LIGHT_ITEMS[] = {
     menu::toggle("Shading", shading_get, shading_set, "Relief: the image lit like a landscape"),
+    menu::toggle("Edge glow", edges_get, edges_set, "Bright outlines where the colors change fast"),
     menu::choice("Direction", light_get, light_set, light_count, light_text, "Where the light comes from")
         .live().decorated(light_decor, 12),
 };
@@ -2090,7 +2112,7 @@ Settings current_settings() {
     s.supersampling = static_cast<uint8_t>(fractalis.supersampling());
     s.color_cycle = static_cast<uint8_t>(color_cycle);
     s.bands = BANDS[bands].id;
-    s.orbit_trap = static_cast<uint8_t>(fractalis.orbit_trap());
+    s.orbit_trap = trap_byte();
     s.light = static_cast<uint8_t>(light);
     s.hud = hud;
     s.auto_zoom = state.auto_zoom;
@@ -2116,7 +2138,7 @@ void apply_settings(const Settings& s) {
     cycle_speed = s.color_cycle_speed >= 1 && s.color_cycle_speed <= CYCLE_SPEED_COUNT ? s.color_cycle_speed - 1
                                                                                       : DEFAULT_CYCLE_SPEED;
     set_bands_id(s.bands);
-    fractalis.set_orbit_trap(s.orbit_trap);
+    apply_trap_byte(s.orbit_trap);
     set_light(s.light < LIGHT_COUNT ? s.light : 0);
     if (light == LIGHT_ROTATING) color_palette.set_light(light_angle);
     hud = s.hud < HUD_COUNT ? s.hud : HUD_ON;

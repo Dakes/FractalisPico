@@ -17,6 +17,7 @@ struct Escape {
     float trap = INFINITY;  // orbit trap: smallest squared distance of the orbit to the trap shape
     bool proven = false;    // in the set because the orbit was found to repeat, not because it reached the limit
     int period = 0;         // period map: the iteration where |z| came closest to 0
+    // Stripes: trap is the sum of the stripe terms, period holds their count and the last term, see record_trap()
 };
 
 /**
@@ -60,9 +61,27 @@ struct TrapScope {
  * Updates the trap with z after an iteration. The period map looks at the whole orbit: the iteration with the smallest
  * |z| so far (the first one on a tie) is the period of the atom domain the pixel is in.
  */
+inline float uv_half(float u, float v, float m) {
+    return u * v / (m * m);  // half of sin(4 angle)
+}
+
 template <int TRAP, typename Scope, typename T>
 inline void record_trap(float& trap, int& period, Scope& scope, int iteration, float zr, float zi, T magnitude_sq) {
     if (TRAP == Fractalis::TRAP_OFF) return;
+    if (TRAP == Fractalis::TRAP_STRIPE) {
+        // sin(4 angle) = Im(z^4) / |z|^4, without atan2: z^2 = u + iv, Im(z^4) = 2uv
+        if (!scope.counts(magnitude_sq)) return;
+        const float m = static_cast<float>(magnitude_sq);
+        if (!(m > 1e-30f)) return;
+        const float u = zr * zr - zi * zi, v = 2.0f * zr * zi;
+        const float term = 0.5f + uv_half(u, v, m);
+        if (!(trap < INFINITY)) trap = 0.0f;
+        trap += term;
+        // The count in the low 16 bit, the last term (15 bit) above: the smooth blend at the end needs both
+        const int count = std::min((period & 0xFFFF) + 1, 0xFFFF);
+        period = count | (static_cast<int>(term * 32767.0f) << 16);
+        return;
+    }
     if (TRAP == Fractalis::TRAP_PERIOD) {
         if (static_cast<float>(magnitude_sq) < trap) {
             trap = static_cast<float>(magnitude_sq);
@@ -81,6 +100,7 @@ Escape with_trap(int trap, const F& f) {
         case Fractalis::TRAP_CROSS: return f(std::integral_constant<int, Fractalis::TRAP_CROSS>());
         case Fractalis::TRAP_RING: return f(std::integral_constant<int, Fractalis::TRAP_RING>());
         case Fractalis::TRAP_PERIOD: return f(std::integral_constant<int, Fractalis::TRAP_PERIOD>());
+        case Fractalis::TRAP_STRIPE: return f(std::integral_constant<int, Fractalis::TRAP_STRIPE>());
         default: return f(std::integral_constant<int, Fractalis::TRAP_OFF>());
     }
 }
@@ -823,6 +843,8 @@ bool Fractalis::calculate_pixel(int x, int y, const View& view, int iter_limit, 
     // The interior checks know that a pixel is in the set without iterating. An orbit trap needs the orbit though,
     // a short one is enough: it is caught in its cycle quickly.
     const bool trapped = view.trap != TRAP_OFF;
+    // Only outside: the interior checks are enough for the inside again
+    const bool trapped_inside = trapped && view.trap_region != REGION_OUTSIDE;
     const int interior_limit = std::min(iter_limit, TRAP_INTERIOR_ITER);
     Escape escape;
     int skipped = 0;  // iterations not done here: continued or skipped by the series approximation
@@ -834,7 +856,7 @@ bool Fractalis::calculate_pixel(int x, int y, const View& view, int iter_limit, 
         float cr = view.center_rf + ((x + 0.5f + sub_x - state->screen_w / 2.0f) * view.step_f + view.center_rf_low);
         float ci = view.center_if + ((y + 0.5f + sub_y - state->screen_h / 2.0f) * view.step_f + view.center_if_low);
         bool interior = is_in_main_bulb(cr, ci);
-        if (interior && !trapped) {
+        if (interior && !trapped_inside) {
             escape = {0, 0.0f, true, false, INFINITY, true};
         } else if (!trapped) {
             const float epsilon = view.step_f * 1e-3f;
@@ -876,7 +898,7 @@ bool Fractalis::calculate_pixel(int x, int y, const View& view, int iter_limit, 
         }
         int limit = interior ? interior_limit : iter_limit;
 
-        if (interior && !trapped) {
+        if (interior && !trapped_inside) {
             escape = {0, 0.0f, true, false, INFINITY, true};
         } else if (view.perturbed && !trapped) {
             double dcr = view.ref_offset_r + offset_r;
@@ -951,10 +973,25 @@ bool Fractalis::calculate_pixel(int x, int y, const View& view, int iter_limit, 
         info->ran_out = escape.in_set && !escape.proven;
     }
 
-    if (trapped) {
+    const bool trap_colors = trapped && (escape.in_set ? view.trap_region != REGION_OUTSIDE
+                                                       : view.trap_region != REGION_INSIDE);
+    if (trap_colors) {
         // Color by the distance of the orbit to the trap, inside the set as well
-        uint32_t position = view.trap == TRAP_PERIOD ? palette::period_position(escape.period, escape.trap)
-                                                     : palette::trap_position(escape.trap);
+        uint32_t position;
+        if (view.trap == TRAP_PERIOD) {
+            position = palette::period_position(escape.period, escape.trap);
+        } else if (view.trap == TRAP_STRIPE) {
+            // Blend between the average without and with the last term, by how far past the bailout it escaped,
+            // so the bands of the iteration count don't show (Härkönen). 1 = just past it, 0 = at its square.
+            float blend = 1.0f;
+            if (!escape.in_set) {
+                const float log2_bailout = 0.5f * std::log2(static_cast<float>(BAILOUT_SQ));
+                blend = 1.0f + std::log2(log2_bailout / (0.5f * std::log2(escape.magnitude_sq)));
+            }
+            position = palette::stripe_position(escape.trap, escape.period, blend);
+        } else {
+            position = palette::trap_position(escape.trap);
+        }
         if (escape.in_set) {
             pixel.setInSetColored(position);
         } else {
@@ -1130,6 +1167,7 @@ void Fractalis::start_pass() {
     pass_view.center_if_low = static_cast<float>((pass_view.center.imag - Fixed(pass_view.center_if)).to_double());
     pass_view.step_f = static_cast<float>(pass_view.step);
     pass_view.trap = trap_mode;
+    pass_view.trap_region = trap_region;
     pass_view.perturbed = pass_view.zoom >= PERTURBATION_MIN_ZOOM;
 
     returned_count = 0;
@@ -1952,9 +1990,10 @@ void Fractalis::set_supersample_right_away(bool on) {
     request_calculation();
 }
 
-void Fractalis::set_orbit_trap(int trap) {
+void Fractalis::set_orbit_trap(int trap, int region) {
     LockGuard guard(lock);
     trap_mode = trap >= TRAP_OFF && trap < TRAP_COUNT ? trap : TRAP_OFF;
+    trap_region = region >= REGION_EVERYWHERE && region < REGION_COUNT ? region : REGION_EVERYWHERE;
     // Recalculate everything, the image stays as preview
     for (int y = 0; y < state->screen_h; ++y) {
         for (int x = 0; x < state->screen_w; ++x) {

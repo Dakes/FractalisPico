@@ -141,6 +141,10 @@ constexpr float AMBIENT = 0.25f;
 // Slopes up to this (squared, in palette positions per pixel) count as flat: a step of the last bit would otherwise
 // show up as a line in otherwise flat areas
 constexpr float MIN_SLOPE_SQ = 2.0f;
+// Edge glow: palette entries per pixel where it starts and where it is full, how far towards white it goes
+constexpr float EDGE_START = LUT_SIZE / 16.0f;
+constexpr float EDGE_FULL = LUT_SIZE / 3.0f;
+constexpr float EDGE_STRENGTH = 0.8f;
 
 uint16_t pack565(float r, float g, float b) {
     auto c = [](float v) { return static_cast<uint16_t>(std::max(0.0f, std::min(v, 255.0f))); };
@@ -219,6 +223,19 @@ uint32_t period_position(int period, float distance_sq) {
     // An octave of distance is 1/256 of the span: a different period always stands out
     const uint32_t shade = std::min<uint32_t>(trap_position(distance_sq) / 16, 1u << 20);
     return BASE + step + shade;
+}
+
+uint32_t stripe_position(float sum, int packed, float blend) {
+    constexpr uint32_t BASE = 1u << 23;  // far from the fade in from black
+    constexpr float SPAN = 1u << 21;     // the average 0-1 spreads over this
+    const int count = packed & 0xFFFF;
+    if (count == 0 || !(sum < INFINITY)) return BASE;
+    const float last = static_cast<float>((packed >> 16) & 0x7FFF) / 32767.0f;
+    const float with_last = sum / count;
+    const float without = count > 1 ? (sum - last) / (count - 1) : with_last;
+    const float b = std::max(0.0f, std::min(blend, 1.0f));
+    const float average = without + (with_last - without) * b;
+    return BASE + static_cast<uint32_t>(std::max(0.0f, std::min(average, 1.0f)) * SPAN);
 }
 
 uint8_t spread_level(uint32_t range) {
@@ -450,19 +467,29 @@ void Palette::render_rows(PixelState* const* pixels, int width, int height, int 
             }
             brightness *= 1.0f - 0.25f * p.coverage();
 
-            if (shading) {
+            float glow = 0.0f;
+            if (shading || edges) {
                 // Slope of the smooth iteration count towards the right and bottom neighbor.
-                // Only its direction matters, which makes the relief look the same at every zoom level.
+                // Only its direction matters for the shading, which makes the relief look the same at every zoom.
                 const PixelState& right = row[x + 1 < width ? x + 1 : x - 1];
                 float dir_x = x + 1 < width ? 1.0f : -1.0f;
                 float gx = right.showsColor() ? dir_x * (static_cast<float>(right.position()) - pos) : 0.0f;
                 float gy = below[x].showsColor() ? dir_y * (static_cast<float>(below[x].position()) - pos) : 0.0f;
                 float length_sq = gx * gx + gy * gy;
-                // The palette position is the height. A slope faces the light when it rises away from it, so it is
-                // lit when the gradient points away from the light. Flat areas are lit like a horizontal surface.
-                float d = length_sq > MIN_SLOPE_SQ ? -(gx * light_x + gy * light_y) / std::sqrt(length_sq) : 0.0f;
-                float light = (d + LIGHT_HEIGHT) / (1.0f + LIGHT_HEIGHT);
-                brightness *= AMBIENT + (1.0f - AMBIENT) * light;
+                if (edges) {
+                    // Palette entries per pixel: from a 16th of the palette per pixel it starts, full at a third. Next to
+                    // the set too.
+                    const float entries = std::sqrt(length_sq) * lut_step * (1.0f / 65536.0f);
+                    glow = !right.showsColor() || !below[x].showsColor() ? 1.0f
+                         : std::max(0.0f, std::min((entries - EDGE_START) / (EDGE_FULL - EDGE_START), 1.0f));
+                }
+                if (shading) {
+                    // The palette position is the height. A slope faces the light when it rises away from it, so it is
+                    // lit when the gradient points away from the light. Flat areas are lit like a horizontal surface.
+                    float d = length_sq > MIN_SLOPE_SQ ? -(gx * light_x + gy * light_y) / std::sqrt(length_sq) : 0.0f;
+                    float light = (d + LIGHT_HEIGHT) / (1.0f + LIGHT_HEIGHT);
+                    brightness *= AMBIENT + (1.0f - AMBIENT) * light;
+                }
             }
 
             if (brightness < 0.999f) {
@@ -470,6 +497,15 @@ void Palette::render_rows(PixelState* const* pixels, int width, int height, int 
                 uint32_t r = ((c >> 11) * scale) >> 8;
                 uint32_t g = (((c >> 5) & 0x3F) * scale) >> 8;
                 uint32_t b = ((c & 0x1F) * scale) >> 8;
+                c = static_cast<uint16_t>((r << 11) | (g << 5) | b);
+            }
+            if (glow > 0.0f) {
+                // Towards white
+                const uint32_t a = static_cast<uint32_t>(glow * EDGE_STRENGTH * 256.0f);
+                uint32_t r = c >> 11, g = (c >> 5) & 0x3F, b = c & 0x1F;
+                r += ((31 - r) * a) >> 8;
+                g += ((63 - g) * a) >> 8;
+                b += ((31 - b) * a) >> 8;
                 c = static_cast<uint16_t>((r << 11) | (g << 5) | b);
             }
             // The display expects big endian
