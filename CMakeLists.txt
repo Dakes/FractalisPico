@@ -126,6 +126,11 @@ target_compile_definitions(${NAME} PRIVATE
 
 target_compile_options(${NAME} PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wno-psabi>
+    # Measured on the device (benchmark branch, 2026-10-05): together 11 % faster than -O3 over the benchmark views,
+    # 16-19 % with perturbation. No fused multiply-add: VFMA takes 3 cycles on the M33, VMUL + VADD 2, and GCC needs an
+    # extra VMOV for most of them. -O2 after the -O3 of Release, the last one counts.
+    $<$<COMPILE_LANGUAGE:CXX>:-ffp-contract=off>
+    $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release>>:-O2>
 )
 
 # Enable floating-point support in printf functions
