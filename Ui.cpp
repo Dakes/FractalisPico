@@ -512,6 +512,27 @@ void store_in_slot(int slot) {
     }
 }
 
+// Empties the slot. Erases its flash sectors: stalls both cores for ~100 ms.
+bool delete_slot(int slot) {
+    if (!settings::clear_view(slot)) return false;
+    if (slot < 2) legacy_slots[slot].zoom = 0;
+    if (pending_thumbnail.slot == slot) pending_thumbnail.slot = -1;
+    return true;
+}
+
+void delete_in_slot(int slot) {
+    settings::View v;
+    if (!slot_view(slot, v)) {
+        toast("Slot %d is empty", slot + 1);
+    } else if (delete_slot(slot)) {
+        toast("Slot %d deleted", slot + 1);
+        show_led_feedback(255, 255, 255, 300);
+    } else {
+        toast("Deleting failed");
+        show_led_feedback(255, 0, 0, 300);
+    }
+}
+
 // ---- USB drive: the views as text (see UsbDrive.hpp and its README.TXT) ----
 
 const char* const USB_KEYWORDS[] = {"current", "slot"};
@@ -891,6 +912,24 @@ const menu::Icon ICON_RINGS = {{
     "..#..........#..",
     "...##+....+##...",
     ".....+####+.....",
+    "................",
+}};
+const menu::Icon ICON_TRASH = {{
+    "................",
+    "......####......",
+    "..############..",
+    "................",
+    "...##########...",
+    "...#.#.##.#.#...",
+    "...#.#.##.#.#...",
+    "...#.#.##.#.#...",
+    "...#.#.##.#.#...",
+    "...#.#.##.#.#...",
+    "...#.#.##.#.#...",
+    "...#.#.##.#.#...",
+    "...##########...",
+    "....########....",
+    "................",
     "................",
 }};
 const menu::Icon ICON_SUN = {{
@@ -1837,6 +1876,14 @@ const char* usb_text(int, int, char*, int) { return usb_drive::present() ? "" : 
 
 void slot_run(int slot) { go_to_slot(slot); }
 void slot_hold(int slot) { store_in_slot(slot); }
+void delete_tap(int slot) {
+    settings::View v;
+    if (slot_view(slot, v))
+        toast("Hold A to delete");
+    else
+        toast("Slot %d is empty", slot + 1);
+}
+void delete_hold(int slot) { delete_in_slot(slot); }
 
 // The picture of the view, its number, zoom and look
 void slot_row(int slot, int selected, const Box& box) {
@@ -1883,6 +1930,8 @@ int hud_count(int) { return HUD_COUNT; }
 const char* hud_text(int, int option, char*, int) { return names(HUD_NAMES, option); }
 
 void save_settings_now(int);
+void factory_reset_tap(int);
+void factory_reset(int);
 
 // Statistics of the current view, fetched once per frame
 Fractalis::ViewStats stats;
@@ -2067,17 +2116,27 @@ constexpr menu::Item slot(int i) {
     return menu::action(nullptr, slot_run, SLOT_HELP).with_hold(slot_hold).with_param(i).with_height(SLOT_ROW_H)
         .drawn_by(slot_row);
 }
+constexpr menu::Item delete_row(int i) {
+    return menu::action(nullptr, delete_tap, "Hold A: delete this view").with_hold(delete_hold).with_param(i)
+        .with_height(SLOT_ROW_H).drawn_by(slot_row);
+}
+constexpr menu::Item DELETE_ITEMS[] = {delete_row(0), delete_row(1), delete_row(2), delete_row(3), delete_row(4),
+                                       delete_row(5), delete_row(6), delete_row(7), delete_row(8), delete_row(9)};
+static_assert(sizeof(DELETE_ITEMS) / sizeof(DELETE_ITEMS[0]) == settings::VIEW_SLOTS, "a row for every slot");
+constexpr menu::Page DELETE_PAGE = {"Delete slot", &ICON_TRASH, VIEWS_COLOR, DELETE_ITEMS, settings::VIEW_SLOTS};
+
 constexpr menu::Item VIEWS_ITEMS[] = {
     menu::action("Previous view", go_back, "Back to where you were before the last jump").with_value(history_text)
         .when(has_history).closing(),
     menu::action("Reset view", reset_view, "Back to the whole set").closing(),
+    menu::page("Delete slot", DELETE_PAGE, "Empties a saved view"),
     menu::page("Places", PLACES_PAGE, "Famous spots and deep zoom tests"),
     menu::page("Minibrots", FINDER_PAGE, "Finds one at the zoom you choose, auto zoom dives there"),
     menu::action("Update USB drive", usb_run, "Puts the views and the picture on the USB drive, it reconnects")
         .with_value(usb_text),
     slot(0), slot(1), slot(2), slot(3), slot(4), slot(5), slot(6), slot(7), slot(8), slot(9),
 };
-static_assert(sizeof(VIEWS_ITEMS) / sizeof(VIEWS_ITEMS[0]) == 5 + settings::VIEW_SLOTS, "a row for every slot");
+static_assert(sizeof(VIEWS_ITEMS) / sizeof(VIEWS_ITEMS[0]) == 6 + settings::VIEW_SLOTS, "a row for every slot");
 constexpr menu::Page VIEWS_PAGE = {"Views", &ICON_BOOKMARK, VIEWS_COLOR, VIEWS_ITEMS,
                                    sizeof(VIEWS_ITEMS) / sizeof(VIEWS_ITEMS[0])};
 
@@ -2088,6 +2147,10 @@ constexpr menu::Item SYSTEM_ITEMS[] = {
                  "The orbit of the center point, or the Julia set of it, in a corner"),
     menu::action("Save settings now", save_settings_now, "Otherwise saved 5 min after the last press"),
     menu::page("Statistics", STATS_PAGE, "Time and work of the current view"),
+    menu::action("Reset settings", factory_reset_tap, "Hold A: all settings as they came, the saved views stay")
+        .with_hold(factory_reset),
+    menu::action("Factory reset", factory_reset_tap, "Hold A: settings and saved views, all as it came")
+        .with_hold(factory_reset).with_param(1),
 };
 constexpr menu::Page SYSTEM_PAGE = {"System", &ICON_GEAR, SYSTEM_COLOR, SYSTEM_ITEMS,
                                     sizeof(SYSTEM_ITEMS) / sizeof(SYSTEM_ITEMS[0])};
@@ -2331,11 +2394,55 @@ void save_settings_now(int) {
     }
 }
 
+// The settings at the start, before the saved ones are applied: what the factory reset goes back to
+Settings factory;
+
+void factory_reset_tap(int) {
+    toast("Hold A to reset");
+}
+
+/**
+ * The settings as they came, saved right away. param 1: the factory reset, the saved views and the way back are
+ * deleted as well (erasing the views stalls both cores for about a second). 0: they stay, the view before can be
+ * found under Previous view.
+ */
+void factory_reset(int with_views) {
+    if (user_search()) finder.stop();
+    bool deleted = true;
+    if (with_views) {
+        for (int slot = 0; slot < settings::VIEW_SLOTS; ++slot) {
+            settings::View v;
+            if (slot_view(slot, v)) deleted = delete_slot(slot) && deleted;
+        }
+        history_count = 0;
+    } else {
+        remember_view();
+    }
+    Settings s = factory;
+    memcpy(s.slots, legacy_slots, sizeof(s.slots));
+    apply_settings(s);
+    // Not part of the settings, they start off as well
+    inset_set(0, INSET_OFF);
+    glow_set(0, 0);
+    menu::close();
+    Settings current = current_settings();
+    const bool stored = settings::save(current);
+    if (stored) saved = current;
+    if (stored && deleted) {
+        toast(with_views ? "Factory reset" : "Settings reset");
+        show_led_feedback(255, 255, 255, 300);
+    } else {
+        toast("Reset, but saving failed");
+        show_led_feedback(255, 0, 0, 300);
+    }
+}
+
 }  // namespace
 
 void start(bool defaults) {
     bool loaded = settings::load(saved);
     fractalis.reset_view();
+    factory = current_settings();
     if (defaults) {
         printf("B held: starting with the default settings\n");
         memcpy(legacy_slots, saved.slots, sizeof(legacy_slots));  // the saved views stay
@@ -2573,7 +2680,9 @@ void apply_settings(const Settings& s) {
     autoZoom.set_pause(s.auto_zoom_pause);
     state.auto_zoom_full_quality = s.auto_zoom_full_quality;
     fractalis.set_show_probes(s.show_probes);
-    if (s.supersample_right_away) fractalis.set_supersample_right_away(true);
+    if (s.supersample_right_away != fractalis.supersample_right_away()) {
+        fractalis.set_supersample_right_away(s.supersample_right_away);
+    }
     fractalis.set_undecided_in_set(!s.set_display_preview);
     memcpy(legacy_slots, s.slots, sizeof(legacy_slots));
     // A running auto zoom continues where it was
