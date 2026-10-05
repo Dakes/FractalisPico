@@ -2423,7 +2423,7 @@ void navigate(Input input, int button) {
         show_led_feedback(200, 0, 255, 100);
 }
 
-// A + B: reset view, A + X: next palette, A + Y: auto zoom on/off
+// A + B: reset view, A + X: info overlay on/off, A + Y: auto zoom on/off
 void quick(int button) {
     switch (button) {
         case 1:
@@ -2431,8 +2431,9 @@ void quick(int button) {
             toast("Reset view");
             break;
         case 2:
-            color_palette.next();
-            toast("Palette: %s", color_palette.name());
+            // Info overlay on or off (auto counts as on: it shows right now)
+            hud = hud == HUD_OFF ? HUD_ON : HUD_OFF;
+            toast("%s", hud == HUD_OFF ? "Info overlay off" : "Info overlay on");
             break;
         case 3:
             set_auto_zoom(!state.auto_zoom);
@@ -2514,7 +2515,7 @@ void render_overlay(PicoGraphics& g, uint32_t now) {
     if (quick_shown) {
         text_a = "[Quick]";
         text_b = "> Reset view";
-        text_x = "Next palette <";
+        text_x = hud == HUD_OFF ? "Show info <" : "Hide info <";
         text_y = state.auto_zoom ? "Stop auto zoom <" : "Start auto zoom <";
     }
     add_text(g, text_a, Point(margin, margin));
