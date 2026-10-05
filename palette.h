@@ -29,6 +29,14 @@ uint32_t period_position(int period, float distance_sq);
 // Stripe average coloring: sum and packed count / last term from the iteration (see record_trap() in fractalis.cpp),
 // blend 0-1 between the average without and with the last term
 uint32_t stripe_position(float sum, int packed, float blend);
+/**
+ * Distance estimation: from log2 of the distance to the set in pixels, 2^16 positions per octave. Closer is higher,
+ * like the iteration count, so the palettes and the relief run the same way. All of them are at or above
+ * DISTANCE_BASE, the iteration counts below it.
+ */
+constexpr uint32_t DISTANCE_BASE = 1u << 23;
+constexpr uint32_t DISTANCE_OCTAVE = 1u << 16;
+uint32_t distance_position(float log2_distance);
 
 /**
  * Supersampling: the range of the sub-sample positions on a log scale in 3 bits. 1 = none, then factors of 8 up
@@ -55,6 +63,11 @@ int count();
 const char* name(int index);
 // The color of a palette at x (0-1 is once through it), RGB565 in native byte order. For previews.
 uint16_t sample(int index, float x);
+// The last palette is one color, set here (RGB565, native byte order). Palettes showing it have to select() it again.
+constexpr int SOLID = 15;
+void set_solid_color(uint16_t color);
+// h 0-1 around the color wheel, s and v 0-1. RGB565, native byte order.
+uint16_t hsv(float h, float s, float v);
 
 class Palette {
 public:
@@ -79,6 +92,12 @@ public:
     bool shading = true;
     // Edge glow: lighter where the colors change fast from pixel to pixel, thin bright outlines along the filaments
     bool edges = false;
+    /**
+     * Outlines of distance estimation: escaped pixels with a distance position (see Fractalis::distance_colors())
+     * get darker towards the set. 0 = none, then thin to bold.
+     */
+    static constexpr int OUTLINE_COUNT = 4;
+    void set_outlines(int option);
     /**
      * Direction the relief light comes from, in radians: 0 = from the right, pi / 2 = from the bottom (screen
      * coordinates). Starts at the top left.
@@ -115,6 +134,10 @@ private:
     // any range of the palette costs a subtraction and a division.
     uint16_t prefix[3][LUT_SIZE + 1];
     uint16_t average(uint32_t start, uint32_t width) const;
+    // Brightness 0-255 (255 = unchanged) over the distances OUTLINE_NEAR .. OUTLINE_FAR octaves (log2 pixels)
+    static constexpr int OUTLINE_STEPS = 256;
+    int outline_option = 0;
+    uint8_t outline[OUTLINE_STEPS];
 };
 
 }  // namespace palette

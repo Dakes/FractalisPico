@@ -82,12 +82,13 @@ const char README[] =
     "\r\n"
     "One view per line, the parts separated by spaces:\r\n"
     "  slot3 zoom 1.2889e+30 re -0.74528480285 im 0.11307472576 palette Ultra\r\n"
-    "  bands 1x trap off shading off light top-left\r\n"
+    "  bands 1x trap off shading off light top-left distance off\r\n"
     "zoom     1 shows the whole set, 4 units across the width of the screen\r\n"
     "re, im   the center, up to 75 decimals\r\n"
     "target   optional, the zoom auto zoom dives to (e.g. a minibrot found)\r\n"
-    "The look (palette to light) is optional, the names as in the menu, with -\r\n"
-    "instead of spaces.\r\n";
+    "The look (palette to distance) is optional, the names as in the menu, with -\r\n"
+    "instead of spaces. With the palette Solid-color: color hue/saturation/brightness,\r\n"
+    "e.g. color azure/80/100 (percentages in steps of 10).\r\n";
 
 struct File {
     char name[12];  // 8.3 without the dot

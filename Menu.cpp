@@ -300,7 +300,7 @@ void draw_row(const Row& r) {
         text(r.value, right - w, cy - 4, value_color);
         right -= w + 6;
     }
-    if (item.decor && (r.list_row || item.kind != Kind::PAGE)) {
+    if (item.decor) {
         int w = item.decor_width;
         item.decor(item.param, r.option, {right - w, cy - 6, w, 12});
     }

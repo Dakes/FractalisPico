@@ -123,8 +123,10 @@ constexpr Definition PALETTES[] = {
     {"Sunset", SUNSET, sizeof(SUNSET) / sizeof(SUNSET[0]), 1.0f, 0.0f},
     {"Aurora", AURORA, sizeof(AURORA) / sizeof(AURORA[0]), 1.0f, 0.0f},
     {"Sepia", SEPIA, sizeof(SEPIA) / sizeof(SEPIA[0]), 1.0f, 0.0f},
+    {"Solid color", nullptr, -1, 1.0f, 0.0f},  // one color, see set_solid_color()
 };
 constexpr int PALETTE_COUNT = sizeof(PALETTES) / sizeof(PALETTES[0]);
+static_assert(PALETTES[SOLID].stop_count < 0 && SOLID == PALETTE_COUNT - 1, "the solid color is the last palette");
 
 // Auto contrast: number of palette cycles between the 1st and 99th percentile of the values on screen
 constexpr float CYCLES_PER_SCREEN = 2.0f;
@@ -145,11 +147,17 @@ constexpr float MIN_SLOPE_SQ = 2.0f;
 constexpr float EDGE_START = LUT_SIZE / 16.0f;
 constexpr float EDGE_FULL = LUT_SIZE / 3.0f;
 constexpr float EDGE_STRENGTH = 0.8f;
+// Outlines of distance estimation: the brightness table covers these distances (log2 pixels), outside of them it is
+// the value at the end
+constexpr float OUTLINE_NEAR = -6.0f;
+constexpr float OUTLINE_FAR = 6.0f;
 
 uint16_t pack565(float r, float g, float b) {
     auto c = [](float v) { return static_cast<uint16_t>(std::max(0.0f, std::min(v, 255.0f))); };
     return static_cast<uint16_t>(((c(r) & 0xF8) << 8) | ((c(g) & 0xFC) << 3) | (c(b) >> 3));
 }
+
+}  // namespace
 
 uint16_t hsv(float h, float s, float v) {
     h = h - std::floor(h);
@@ -169,6 +177,11 @@ uint16_t hsv(float h, float s, float v) {
     }
 }
 
+namespace {
+
+// The color of the solid palette
+uint16_t solid_color = 0xFFFF;
+
 // Smooth (cosine) interpolation between cyclic color stops
 uint16_t gradient(const Definition& def, float x) {
     x = x - std::floor(x);
@@ -186,6 +199,11 @@ uint16_t gradient(const Definition& def, float x) {
     return pack565(a.r + (b.r - a.r) * f, a.g + (b.g - a.g) * f, a.b + (b.b - a.b) * f);
 }
 
+uint16_t color_at(const Definition& def, float x) {
+    if (def.stop_count < 0) return solid_color;
+    return def.stop_count == 0 ? hsv(x, 1.0f, 1.0f) : gradient(def, x);
+}
+
 }  // namespace
 
 int count() {
@@ -198,8 +216,11 @@ const char* name(int index) {
 
 uint16_t sample(int index, float x) {
     const Definition& def = PALETTES[((index % PALETTE_COUNT) + PALETTE_COUNT) % PALETTE_COUNT];
-    x += def.offset;
-    return def.stop_count == 0 ? hsv(x, 1.0f, 1.0f) : gradient(def, x);
+    return color_at(def, x + def.offset);
+}
+
+void set_solid_color(uint16_t color) {
+    solid_color = color;
 }
 
 uint32_t position(float smooth_iteration) {
@@ -238,6 +259,12 @@ uint32_t stripe_position(float sum, int packed, float blend) {
     return BASE + static_cast<uint32_t>(std::max(0.0f, std::min(average, 1.0f)) * SPAN);
 }
 
+uint32_t distance_position(float log2_distance) {
+    // 2^32 pixels far is 0, 2^-32 pixels close is the top
+    const float octaves = std::max(0.0f, std::min(32.0f - log2_distance, 63.99f));
+    return DISTANCE_BASE + static_cast<uint32_t>(octaves * DISTANCE_OCTAVE);
+}
+
 uint8_t spread_level(uint32_t range) {
     if (range < 2) return 1;
     // nearest level on the log scale, level k stands for 8^(k - 1)
@@ -254,6 +281,24 @@ Palette::Palette()
     : current(0), phase_offset(0), range_start(0.0f), cycles(1.0f), target_range_start(0.0f), target_cycles(1.0f),
       lut_step(0) {
     select(0);
+    set_outlines(0);
+}
+
+void Palette::set_outlines(int option) {
+    outline_option = std::max(0, std::min(option, OUTLINE_COUNT - 1));
+    // Brightness (d / width)^2 up to 1, d the distance in pixels. Bold lines (width 0.5) are about a pixel wide, the
+    // thinner ones fall between the pixel centers in places and look dotted there, supersampling fills them in.
+    static constexpr float WIDTH[OUTLINE_COUNT] = {0.0f, 0.125f, 0.25f, 0.5f};
+    const float width = WIDTH[outline_option];
+    for (int i = 0; i < OUTLINE_STEPS; ++i) {
+        const float log2_d = OUTLINE_NEAR + (OUTLINE_FAR - OUTLINE_NEAR) * (i + 0.5f) / OUTLINE_STEPS;
+        float brightness = 1.0f;
+        if (width > 0.0f) {
+            const float x = std::exp2(log2_d) / width;
+            brightness = std::min(1.0f, x * x);
+        }
+        outline[i] = static_cast<uint8_t>(std::lround(brightness * 255.0f));
+    }
 }
 
 void Palette::set_light(float angle) {
@@ -333,8 +378,7 @@ void Palette::select(int index) {
     current = ((index % PALETTE_COUNT) + PALETTE_COUNT) % PALETTE_COUNT;
     const Definition& def = PALETTES[current];
     for (int i = 0; i < LUT_SIZE; ++i) {
-        float x = static_cast<float>(i) / LUT_SIZE + def.offset;
-        lut[i] = def.stop_count == 0 ? hsv(x, 1.0f, 1.0f) : gradient(def, x);
+        lut[i] = color_at(def, static_cast<float>(i) / LUT_SIZE + def.offset);
     }
     prefix[0][0] = prefix[1][0] = prefix[2][0] = 0;
     for (int i = 0; i < LUT_SIZE; ++i) {
@@ -466,6 +510,13 @@ void Palette::render_rows(PixelState* const* pixels, int width, int height, int 
                 }
             }
             brightness *= 1.0f - 0.25f * p.coverage();
+            if (outline_option > 0 && p.hasPosition() && pos >= DISTANCE_BASE) {
+                // Darker towards the set: the table index from the distance, near at 0
+                constexpr int NEAR = static_cast<int>(DISTANCE_BASE + (32.0f - OUTLINE_NEAR) * DISTANCE_OCTAVE);
+                constexpr int STEP = static_cast<int>((OUTLINE_FAR - OUTLINE_NEAR) * DISTANCE_OCTAVE) / OUTLINE_STEPS;
+                const int i = (NEAR - static_cast<int>(pos)) / STEP;
+                brightness *= outline[std::max(0, std::min(i, OUTLINE_STEPS - 1))] * (1.0f / 255.0f);
+            }
 
             float glow = 0.0f;
             if (shading || edges) {

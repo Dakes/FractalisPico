@@ -68,6 +68,18 @@ public:
     int orbit_trap_region() const { return trap_region; }
 
     /**
+     * Distance estimation: outside of the set, the palette position comes from the distance to the set (see
+     * palette::distance_position()) instead of the iteration count, where the orbit trap doesn't color. Every
+     * iteration carries the derivative dz/dc then, which makes it slower. Changing it recalculates the view.
+     */
+    void set_distance(bool on);
+    bool distance() const { return distance_; }
+    // The outside is colored by distance: on, and the orbit trap doesn't color there
+    bool distance_colors() const {
+        return distance_ && (trap_mode == TRAP_OFF || trap_region == REGION_INSIDE);
+    }
+
+    /**
      * Supersampling right away: every pixel gets all of its sub-samples in every pass, the probes as well. No
      * separate supersampling pass at the end: slower until the first image, but it doesn't change its look when it's
      * done. Changing it recalculates the view.
@@ -134,6 +146,8 @@ private:
         double interior_radius_sq = 0;
         int trap = TRAP_OFF;
         int trap_region = REGION_EVERYWHERE;
+        bool distance = false;  // see distance_colors()
+        float step_log2 = 0;    // log2(step), the pixel size for the distance estimate
         // Series approximation: dz at iteration series_skip = sum series[k] dc^(k+1), the pixels start there
         int series_skip = 0;
         double series_r[4] = {}, series_i[4] = {};
@@ -273,6 +287,9 @@ private:
 
     int trap_mode = TRAP_OFF;
     int trap_region = REGION_EVERYWHERE;
+    bool distance_ = false;
+    // Everything again with the image as preview, e.g. after a change of the coloring
+    void recalculate_all();
     bool ss_right_away = false;
     bool show_probes_ = false;
     bool undecided_in_set_ = UNDECIDED_IN_SET;

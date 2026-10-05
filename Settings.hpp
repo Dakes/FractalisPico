@@ -34,8 +34,13 @@ struct Settings {
         Coordinate center;
         double zoom;
     } slots[2];
+    // Distance estimation and the solid color, like View::extra_look
+    uint16_t extra_look;
+    uint8_t edge_glow;
+    // The record fills its flash page now: new fields go here
+    uint8_t reserved[5];
 };
-static_assert(sizeof(Settings) == 232, "Settings must not contain padding");
+static_assert(sizeof(Settings) == 240, "Settings must not contain padding");
 
 /**
  * Stores the settings in the last sectors of the flash. Every save appends a record of one flash page, the newest
@@ -63,7 +68,8 @@ struct View {
     // The look it was stored with, restored when going there
     uint8_t has_look;
     uint8_t palette, bands, orbit_trap, shading, light;
-    uint8_t reserved[2];
+    // Added later, 0 in older views (off, white): distance estimation and the solid color, see pack_look() in Ui.cpp
+    uint16_t extra_look;
 };
 static_assert(sizeof(View) == 80, "View must not contain padding");
 

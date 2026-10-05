@@ -81,8 +81,82 @@ static_assert(sizeof(REGION_NAMES) / sizeof(REGION_NAMES[0]) == Fractalis::REGIO
 uint8_t trap_byte() {
     return static_cast<uint8_t>(fractalis.orbit_trap() | (fractalis.orbit_trap_region() << 4));
 }
+void update_outlines();
 void apply_trap_byte(uint8_t b) {
     fractalis.set_orbit_trap(b & 15, b >> 4);
+    update_outlines();
+}
+
+// Distance estimation: off, the colors by distance without lines, then outlines from thin to bold
+const char* const DISTANCE_NAMES[] = {"off", "no lines", "thin lines", "lines", "bold lines"};
+constexpr int DISTANCE_COUNT = sizeof(DISTANCE_NAMES) / sizeof(DISTANCE_NAMES[0]);
+static_assert(DISTANCE_COUNT - 1 == palette::Palette::OUTLINE_COUNT, "an option for every outline width");
+int distance = 0;
+
+// Only where the outside is colored by distance, not over the colors of an orbit trap
+void update_outlines() {
+    color_palette.set_outlines(fractalis.distance_colors() ? distance - 1 : 0);
+}
+
+void set_distance(int option) {
+    distance = std::max(0, std::min(option, DISTANCE_COUNT - 1));
+    fractalis.set_distance(distance > 0);
+    update_outlines();
+}
+
+// The solid color palette: the hue in 24 steps around the color wheel, saturation and brightness in steps of 10 %
+constexpr int HUE_STEPS = 24;
+const char* const HUE_NAMES[] = {"red",  "orange", "yellow", "lime",   "green",   "mint",
+                                 "cyan", "azure",  "blue",   "violet", "magenta", "rose"};
+static_assert(sizeof(HUE_NAMES) / sizeof(HUE_NAMES[0]) * 2 == HUE_STEPS, "a name every second hue");
+struct SolidColor {
+    int hue = 0, saturation = 0, brightness = 10;  // white
+};
+SolidColor solid;
+
+uint16_t solid_rgb(const SolidColor& c) {
+    return palette::hsv(static_cast<float>(c.hue) / HUE_STEPS, c.saturation / 10.0f, c.brightness / 10.0f);
+}
+
+void apply_solid_color() {
+    palette::set_solid_color(solid_rgb(solid));
+    if (color_palette.index() == palette::SOLID) color_palette.select(palette::SOLID);
+}
+
+// Every second hue has a name, the ones in between both of their neighbors: "red-orange"
+const char* hue_name(int hue, char* buffer, int size) {
+    if (hue % 2 == 0) return HUE_NAMES[hue / 2];
+    snprintf(buffer, size, "%s-%s", HUE_NAMES[hue / 2], HUE_NAMES[(hue / 2 + 1) % (HUE_STEPS / 2)]);
+    return buffer;
+}
+
+/**
+ * Saved in 16 bit next to the rest of the look, 0 (as older records have it) is off and white: distance estimation
+ * in bits 0-2, the solid color above it: hue in bits 3-7, saturation in 8-11, 10 - brightness in 12-15.
+ */
+uint16_t pack_look(int distance_option, const SolidColor& c) {
+    return static_cast<uint16_t>(distance_option | c.hue << 3 | c.saturation << 8 | (10 - c.brightness) << 12);
+}
+int look_distance(uint16_t look) {
+    return std::min(look & 7, DISTANCE_COUNT - 1);
+}
+SolidColor look_color(uint16_t look) {
+    SolidColor c;
+    c.hue = std::min((look >> 3) & 31, HUE_STEPS - 1);
+    c.saturation = std::min((look >> 8) & 15, 10);
+    c.brightness = 10 - std::min(look >> 12, 10);
+    return c;
+}
+uint16_t extra_look() {
+    return pack_look(distance, solid);
+}
+// color: take the solid color as well (only when the look uses it, the picker keeps its color otherwise)
+void apply_extra_look(uint16_t look, bool color) {
+    set_distance(look_distance(look));
+    if (color) {
+        solid = look_color(look);
+        apply_solid_color();
+    }
 }
 
 constexpr int SUPERSAMPLING[] = {1, 2, 3, 4, 6, 8};
@@ -397,10 +471,21 @@ bool store_current_view(int slot) {
     v.orbit_trap = trap_byte();
     v.shading = color_palette.shading;
     v.light = static_cast<uint8_t>(light);
+    v.extra_look = extra_look();
     if (!settings::store_view(slot, v, draw_thumbnail)) return false;
     if (slot < 2) legacy_slots[slot].zoom = 0;  // replaced
     pending_thumbnail = {state.calculating ? slot : -1, state.calculation_id};
     return true;
+}
+
+// The look a view was stored with
+void apply_look(const settings::View& v) {
+    apply_extra_look(v.extra_look, v.palette == palette::SOLID);
+    color_palette.select(v.palette);
+    set_bands_id(v.bands);
+    apply_trap_byte(v.orbit_trap);
+    color_palette.shading = v.shading;
+    set_light(v.light);
 }
 
 void go_to_slot(int slot) {
@@ -410,13 +495,7 @@ void go_to_slot(int slot) {
         show_led_feedback(255, 0, 0, 300);
         return;
     }
-    if (v.has_look) {
-        color_palette.select(v.palette);
-        set_bands_id(v.bands);
-        apply_trap_byte(v.orbit_trap);
-        color_palette.shading = v.shading;
-        set_light(v.light);
-    }
+    if (v.has_look) apply_look(v);
     jump(v.center, v.zoom);
     if (!settings::thumbnail(slot)) pending_thumbnail = {slot, state.calculation_id};
     menu::close();
@@ -524,6 +603,16 @@ int view_line(char* out, int size, const char* name, const settings::View& v) {
         n += snprintf(out + n, size - n, " palette %s bands %s trap %s shading %s light %s", palette_text,
                       bands_name(v.bands), TRAP_NAMES[(v.orbit_trap & 15) % Fractalis::TRAP_COUNT],
                       v.shading ? "on" : "off", light_text);
+        char distance_text[24];
+        put_name(distance_text, sizeof(distance_text), DISTANCE_NAMES[look_distance(v.extra_look)]);
+        if (n < size) n += snprintf(out + n, size - n, " distance %s", distance_text);
+        if (v.palette == palette::SOLID && n < size) {
+            // hue/saturation/brightness, e.g. azure/80/100
+            const SolidColor c = look_color(v.extra_look);
+            char hue[24];
+            n += snprintf(out + n, size - n, " color %s/%d/%d", hue_name(c.hue, hue, sizeof(hue)), 10 * c.saturation,
+                          10 * c.brightness);
+        }
     }
     return std::min(n, size - 1);
 }
@@ -538,6 +627,7 @@ settings::View current_view() {
     v.orbit_trap = trap_byte();
     v.shading = color_palette.shading;
     v.light = static_cast<uint8_t>(light);
+    v.extra_look = extra_look();
     return v;
 }
 
@@ -653,6 +743,28 @@ bool parse_usb_line(const char* text, UsbLine& out) {
                 if ((found = same_name(value, LIGHT_NAMES[k]))) v.light = static_cast<uint8_t>(k);
             }
             v.has_look = 1;
+        } else if (strcmp(key, "distance") == 0) {
+            for (int k = 0; k < DISTANCE_COUNT && !found; ++k) {
+                if ((found = same_name(value, DISTANCE_NAMES[k]))) {
+                    v.extra_look = pack_look(k, look_color(v.extra_look));
+                }
+            }
+            v.has_look = 1;
+        } else if (strcmp(key, "color") == 0) {
+            // hue/saturation/brightness, the percentages in steps of 10
+            char hue[24];
+            int saturation, brightness;
+            if (sscanf(value, "%23[^/]/%d/%d", hue, &saturation, &brightness) == 3) {
+                SolidColor c;
+                char buffer[24];
+                for (int k = 0; k < HUE_STEPS && !found; ++k) {
+                    if ((found = same_name(hue, hue_name(k, buffer, sizeof(buffer))))) c.hue = k;
+                }
+                c.saturation = std::max(0, std::min((saturation + 5) / 10, 10));
+                c.brightness = std::max(0, std::min((brightness + 5) / 10, 10));
+                if (found) v.extra_look = pack_look(look_distance(v.extra_look), c);
+            }
+            v.has_look = 1;
         }
         // Other words are left for later versions
     }
@@ -686,13 +798,7 @@ void usb_import() {
     }
     if (go) {
         const settings::View& v = current.view;
-        if (v.has_look) {
-            color_palette.select(v.palette);
-            set_bands_id(v.bands);
-            apply_trap_byte(v.orbit_trap);
-            color_palette.shading = v.shading;
-            set_light(v.light);
-        }
+        if (v.has_look) apply_look(v);
         jump(v.center, v.zoom);
         if (current.target > 0) {
             autoZoom.set_target(state.center, std::min(current.target, PRECISION_MAX_ZOOM));
@@ -748,6 +854,43 @@ const menu::Icon ICON_PALETTE = {{
     "...##########...",
     ".....######.....",
     "................",
+    "................",
+}};
+const menu::Icon ICON_DROP = {{
+    "................",
+    ".......++.......",
+    "......+##+......",
+    "......####......",
+    ".....+####+.....",
+    ".....######.....",
+    "....+######+....",
+    "....########....",
+    "...+########+...",
+    "...##########...",
+    "...##########...",
+    "...##########...",
+    "...+########+...",
+    "....+######+....",
+    "......####......",
+    "................",
+}};
+// A dot inside two rings: distance lines around a shape
+const menu::Icon ICON_RINGS = {{
+    "................",
+    ".....+####+.....",
+    "...##+....+##...",
+    "..#..........#..",
+    ".#...+####+...#.",
+    ".#..#+....+#..#.",
+    "#..#........#..#",
+    "#..#...##...#..#",
+    "#..#...##...#..#",
+    "#..#........#..#",
+    ".#..#+....+#..#.",
+    ".#...+####+...#.",
+    "..#..........#..",
+    "...##+....+##...",
+    ".....+####+.....",
     "................",
 }};
 const menu::Icon ICON_SUN = {{
@@ -1492,12 +1635,65 @@ void cycle_speed_set(int, int v) { cycle_speed = v; }
 int cycle_speed_count(int) { return CYCLE_SPEED_COUNT; }
 const char* cycle_speed_text(int, int option, char*, int) { return CYCLE_SPEEDS[option].name; }
 
+// A color box with a soft frame, so black and dark colors show on the panel as well
+void color_swatch(uint16_t color, const Box& box) {
+    if (!menu::visible(box)) return;
+    const Color c = {static_cast<uint8_t>((color >> 11) * 255 / 31),
+                     static_cast<uint8_t>(((color >> 5) & 63) * 255 / 63),
+                     static_cast<uint8_t>((color & 31) * 255 / 31)};
+    menu::round_rect({box.x, box.y + 1, box.w, box.h - 2}, 3, menu::SOFT_TEXT, 90);
+    menu::round_rect({box.x + 1, box.y + 2, box.w - 2, box.h - 4}, 2, c);
+}
+
+// Solid color, param: 0 hue, 1 saturation, 2 brightness
+int& solid_part(SolidColor& c, int param) {
+    return param == 0 ? c.hue : param == 1 ? c.saturation : c.brightness;
+}
+int solid_get(int param) { return solid_part(solid, param); }
+void solid_set(int param, int v) {
+    solid_part(solid, param) = v;
+    apply_solid_color();
+    // Picking a color shows it
+    if (color_palette.index() != palette::SOLID) color_palette.select(palette::SOLID);
+}
+int solid_count(int param) { return param == 0 ? HUE_STEPS : 11; }
+const char* solid_text(int param, int option, char* buffer, int size) {
+    if (param == 0) return hue_name(option, buffer, size);
+    snprintf(buffer, size, "%d %%", 10 * option);
+    return buffer;
+}
+// The hue at full color, the others the color that option gives
+void solid_decor(int param, int option, const Box& box) {
+    SolidColor c = solid;
+    if (param == 0) c = {option, 10, 10};
+    else solid_part(c, param) = option;
+    color_swatch(solid_rgb(c), box);
+}
+void solid_page_decor(int, int, const Box& box) { color_swatch(solid_rgb(solid), box); }
+
+int distance_get(int) { return distance; }
+void distance_set(int, int v) { set_distance(v); }
+int distance_count(int) { return DISTANCE_COUNT; }
+const char* distance_text(int, int option, char*, int) { return DISTANCE_NAMES[option]; }
+// The width of the lines
+void distance_decor(int, int option, const Box& box) {
+    if (option < 2) return;
+    const int width = option - 1;
+    menu::fill({box.x + box.w / 2 - 6, box.y + box.h / 2 - width / 2, 13, width}, LIGHT_TEXT);
+}
+
 int trap_get(int) { return fractalis.orbit_trap(); }
 int region_get(int) { return fractalis.orbit_trap_region(); }
-void region_set(int, int v) { fractalis.set_orbit_trap(fractalis.orbit_trap(), v); }
+void region_set(int, int v) {
+    fractalis.set_orbit_trap(fractalis.orbit_trap(), v);
+    update_outlines();
+}
 int region_count(int) { return Fractalis::REGION_COUNT; }
 const char* region_text(int, int option, char*, int) { return REGION_NAMES[option]; }
-void trap_set(int, int v) { fractalis.set_orbit_trap(v); }
+void trap_set(int, int v) {
+    fractalis.set_orbit_trap(v);
+    update_outlines();
+}
 int trap_count(int) { return Fractalis::TRAP_COUNT; }
 const char* trap_text(int, int option, char*, int) { return names(TRAP_NAMES, option); }
 void trap_decor(int, int option, const Box& box) {
@@ -1669,8 +1865,10 @@ void slot_row(int slot, int selected, const Box& box) {
         format_zoom(text, sizeof(text), v.zoom);
         menu::text(text, tx, box.y + 22, menu::SOFT_TEXT);
         if (v.has_look) {
-            snprintf(text, sizeof(text), "%s%s%s", palette::name(v.palette), (v.orbit_trap & 15) ? ", " : "",
-                     (v.orbit_trap & 15) ? TRAP_NAMES[(v.orbit_trap & 15) % Fractalis::TRAP_COUNT] : "");
+            const int trap = v.orbit_trap & 15;
+            snprintf(text, sizeof(text), "%s%s%s%s", palette::name(v.palette), trap ? ", " : "",
+                     trap ? TRAP_NAMES[trap % Fractalis::TRAP_COUNT] : "",
+                     look_distance(v.extra_look) ? ", distance" : "");
             menu::text(text, tx, box.y + 35, menu::SOFT_TEXT);
         }
     } else {
@@ -1749,6 +1947,7 @@ const char* stat_uptime(int, int, char* buffer, int size) {
 // ---- Pages ----
 
 constexpr Color COLORS_COLOR = {200, 70, 255};
+constexpr Color STYLE_COLOR = {50, 215, 190};
 constexpr Color LIGHT_COLOR = {255, 185, 40};
 constexpr Color RENDERING_COLOR = {80, 220, 120};
 constexpr Color AUTO_ZOOM_COLOR = {40, 195, 255};
@@ -1792,22 +1991,43 @@ constexpr menu::Item FINDER_ITEMS[] = {
 static_assert(sizeof(FINDER_ITEMS) / sizeof(FINDER_ITEMS[0]) == 1 + FINDER_DEPTHS, "a row for every depth");
 constexpr menu::Page FINDER_PAGE = {"Minibrots", &ICON_FINDER, VIEWS_COLOR, FINDER_ITEMS, 1 + FINDER_DEPTHS};
 
+constexpr menu::Item SOLID_ITEMS[] = {
+    menu::choice("Hue", solid_get, solid_set, solid_count, solid_text,
+                 "Around the color wheel, shows with saturation").live().decorated(solid_decor, 24),
+    menu::choice("Saturation", solid_get, solid_set, solid_count, solid_text, "From gray or white to full color")
+        .live().decorated(solid_decor, 24).with_param(1),
+    menu::choice("Brightness", solid_get, solid_set, solid_count, solid_text, "From black to bright")
+        .live().decorated(solid_decor, 24).with_param(2),
+};
+constexpr menu::Page SOLID_PAGE = {"Solid color", &ICON_DROP, COLORS_COLOR, SOLID_ITEMS,
+                                   sizeof(SOLID_ITEMS) / sizeof(SOLID_ITEMS[0])};
+
 constexpr menu::Item COLORS_ITEMS[] = {
     menu::choice("Palette", palette_get, palette_set, palette_count, palette_text, "The colors of the image")
         .live().decorated(palette_decor, 36),
+    menu::page("Solid color", SOLID_PAGE, "One color instead of a palette, picking one selects it")
+        .decorated(solid_page_decor, 24),
     menu::choice("Bands", bands_get, bands_set, bands_count, bands_text,
                  "How often the palette repeats over the image").live().decorated(bands_decor, 36),
     menu::choice("Color cycle", cycle_get, cycle_set, cycle_count, cycle_text,
                  "When the colors flow through the image").live(),
     menu::choice("Cycle speed", cycle_speed_get, cycle_speed_set, cycle_speed_count, cycle_speed_text,
                  "Time for one round through the palette").live(),
+};
+constexpr menu::Page COLORS_PAGE = {"Colors", &ICON_PALETTE, COLORS_COLOR, COLORS_ITEMS,
+                                    sizeof(COLORS_ITEMS) / sizeof(COLORS_ITEMS[0])};
+
+// What the colors come from: the iteration count, the distance or an orbit trap
+constexpr menu::Item STYLE_ITEMS[] = {
+    menu::choice("Distance", distance_get, distance_set, distance_count, distance_text,
+                 "Outside colored by the distance to the set, with outlines. Slower").decorated(distance_decor, 16),
     menu::choice("Orbit trap", trap_get, trap_set, trap_count, trap_text,
                  "Colors by how close the orbit comes to a shape").decorated(trap_decor, 12),
     menu::choice("Trap colors", region_get, region_set, region_count, region_text,
                  "Where the orbit trap colors, the rest is colored as usual"),
 };
-constexpr menu::Page COLORS_PAGE = {"Colors", &ICON_PALETTE, COLORS_COLOR, COLORS_ITEMS,
-                                    sizeof(COLORS_ITEMS) / sizeof(COLORS_ITEMS[0])};
+constexpr menu::Page STYLE_PAGE = {"Style", &ICON_RINGS, STYLE_COLOR, STYLE_ITEMS,
+                                   sizeof(STYLE_ITEMS) / sizeof(STYLE_ITEMS[0])};
 
 constexpr menu::Item LIGHT_ITEMS[] = {
     menu::toggle("Shading", shading_get, shading_set, "Relief: the image lit like a landscape"),
@@ -1873,7 +2093,8 @@ constexpr menu::Page SYSTEM_PAGE = {"System", &ICON_GEAR, SYSTEM_COLOR, SYSTEM_I
                                     sizeof(SYSTEM_ITEMS) / sizeof(SYSTEM_ITEMS[0])};
 
 constexpr menu::Item MAIN_ITEMS[] = {
-    menu::page("Colors", COLORS_PAGE, "Palette, bands, color cycling, orbit traps"),
+    menu::page("Colors", COLORS_PAGE, "Palette or solid color, bands, color cycling"),
+    menu::page("Style", STYLE_PAGE, "Distance outlines and orbit traps"),
     menu::page("Light", LIGHT_PAGE, "Relief shading and where the light comes from"),
     menu::page("Rendering", RENDERING_PAGE, "Supersampling and how the image builds up"),
     menu::page("Auto zoom", AUTO_ZOOM_PAGE, "Dives on its own into the most detailed area"),
@@ -2326,6 +2547,8 @@ Settings current_settings() {
     s.set_display_preview = !fractalis.undecided_in_set();
     s.color_cycle_speed = static_cast<uint8_t>(cycle_speed == DEFAULT_CYCLE_SPEED ? 0 : cycle_speed + 1);
     memcpy(s.slots, legacy_slots, sizeof(s.slots));
+    s.extra_look = extra_look();
+    s.edge_glow = color_palette.edges;
     return s;
 }
 
@@ -2333,7 +2556,9 @@ Settings current_settings() {
 void apply_settings(const Settings& s) {
     bool view_valid = std::isfinite(s.zoom) && s.zoom > 0;
     if (view_valid) fractalis.set_view(s.center, s.zoom);
+    apply_extra_look(s.extra_look, true);
     color_palette.select(s.palette);
+    color_palette.edges = s.edge_glow;
     color_palette.shading = s.shading;
     fractalis.set_supersampling(s.supersampling);
     color_cycle = s.color_cycle < 3 ? static_cast<ColorCycle>(s.color_cycle) : ColorCycle::ALWAYS;
