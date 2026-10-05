@@ -1319,6 +1319,8 @@ const char* inset_text(int, int option, char*, int) { return INSET_NAMES[option]
  * A soft halo over minibrots too small to see. Once a view is done, core0 probes a grid of cells: the ball method
  * finds the biggest minibrot in the disc around each (see MinibrotFinder::probe()). The ones smaller than a few
  * pixels glow, bigger ones are visible anyway. Shares the finder with the minibrot search, which goes first.
+ * Each one glows as soon as it is found. After a pan or zoom the ones of the view before move along and glow until
+ * the scan of the new view is done, those it doesn't find again go then.
  */
 constexpr int GLOW_CELL = 20;                       // pixels, square
 constexpr int GLOW_COLUMNS = SCREEN_W / GLOW_CELL;  // 16
@@ -1327,20 +1329,27 @@ constexpr int GLOW_MAX = 64;                        // the biggest ones
 constexpr float GLOW_VISIBLE_PX = 32.0f;            // bigger minibrots are easy to see, they don't glow
 constexpr Color GLOW_COLOR = {170, 235, 255};
 struct GlowSpot {
-    float x, y;  // on screen
-    float px;    // size of the minibrot in pixels
+    double x, y;                  // the nucleus on screen, exact enough to go there
+    std::complex<double> scale;   // MinibrotFinder::Result::scale
+    float px;                     // size of the minibrot in pixels
+    uint16_t period;
+    bool stale;                   // from a view before, not found by the scan of this one (yet)
 };
 bool glow_on = false;
+bool glow_by_size = false;  // more saturated the smaller, instead of all the same
 GlowSpot glow_spots[GLOW_MAX];
 int glow_count = 0;
 uint32_t glow_calculation = 0;  // the view scanned (or being scanned)
+// The view the spots are placed in: they move along from there
+Coordinate glow_center;
+double glow_zoom = 1.0;
 bool glow_done = false;
 
 // Width of a pixel in the complex plane, like search_starts()
 double glow_pixel() { return 4.0 / state.zoom_factor / state.screen_w; }
 
 // The complex coordinate of a point on screen (pixel centers at .5)
-Coordinate glow_point(float x, float y) {
+Coordinate glow_point(double x, double y) {
     Coordinate c = state.center;
     const double pixel = glow_pixel();
     c.real += Fixed((x - state.screen_w * 0.5) * pixel);
@@ -1359,8 +1368,46 @@ bool glow_cell_worth(int cell) {
     return false;
 }
 
+// Glows there: on the screen and too small to see
+bool glow_visible(const GlowSpot& s) {
+    return s.px < GLOW_VISIBLE_PX && s.x >= 0 && s.x < state.screen_w && s.y >= 0 && s.y < state.screen_h;
+}
+
+// Keeps the spots that pass, in their order
+template <typename F>
+void glow_keep(F pass) {
+    int n = 0;
+    for (int i = 0; i < glow_count; ++i) {
+        if (pass(glow_spots[i])) glow_spots[n++] = glow_spots[i];
+    }
+    glow_count = n;
+}
+
+// The cells from the center of the screen outwards, where one looks first
+constexpr int GLOW_CELLS = GLOW_COLUMNS * GLOW_ROWS;
+uint8_t glow_order[GLOW_CELLS];
+int glow_step = -1;  // in glow_order, of glow_cell
+
+void glow_sort_cells() {
+    static bool sorted = false;
+    if (sorted) return;
+    sorted = true;
+    auto distance = [](int cell) {
+        const int dx = 2 * (cell % GLOW_COLUMNS) + 1 - GLOW_COLUMNS, dy = 2 * (cell / GLOW_COLUMNS) + 1 - GLOW_ROWS;
+        return dx * dx + dy * dy;
+    };
+    for (int i = 0; i < GLOW_CELLS; ++i) {
+        int j = i;
+        for (; j > 0 && distance(glow_order[j - 1]) > distance(i); --j) glow_order[j] = glow_order[j - 1];
+        glow_order[j] = static_cast<uint8_t>(i);
+    }
+}
+
 void glow_next_cell() {
-    while (++glow_cell < GLOW_COLUMNS * GLOW_ROWS) {
+    if (glow_cell < 0) glow_step = -1;  // starts over
+    glow_sort_cells();
+    while (++glow_step < GLOW_CELLS) {
+        glow_cell = glow_order[glow_step];
         if (!glow_cell_worth(glow_cell)) continue;
         const float cx = (glow_cell % GLOW_COLUMNS + 0.5f) * GLOW_CELL, cy = (glow_cell / GLOW_COLUMNS + 0.5f) * GLOW_CELL;
         finder.probe(glow_point(cx, cy), GLOW_CELL * 0.7071 * glow_pixel());
@@ -1368,6 +1415,8 @@ void glow_next_cell() {
     }
     glow_cell = -1;
     glow_done = true;
+    // The ones of the views before that this scan didn't find
+    glow_keep([](const GlowSpot& s) { return !s.stale; });
     state.needs_redraw = true;
 }
 
@@ -1376,19 +1425,55 @@ void glow_probe_done() {
     if (!finder.found()) return;
     const MinibrotFinder::Result& r = finder.result();
     const double pixel = glow_pixel();
-    const float x = static_cast<float>((r.nucleus.real - state.center.real).to_double() / pixel + state.screen_w * 0.5);
-    const float y = static_cast<float>((r.nucleus.imag - state.center.imag).to_double() / pixel + state.screen_h * 0.5);
+    GlowSpot spot = {(r.nucleus.real - state.center.real).to_double() / pixel + state.screen_w * 0.5,
+                     (r.nucleus.imag - state.center.imag).to_double() / pixel + state.screen_h * 0.5, r.scale,
+                     // It fills the screen at its zoom, the set is about 2.5 of the 4 units wide
+                     static_cast<float>(state.screen_w * state.zoom_factor / r.zoom() * 0.625),
+                     static_cast<uint16_t>(std::min(r.period, 65535)), false};
+    if (!glow_visible(spot)) return;
     const int cx = glow_cell % GLOW_COLUMNS, cy = glow_cell / GLOW_COLUMNS;
-    if (!(x >= cx * GLOW_CELL && x < (cx + 1) * GLOW_CELL && y >= cy * GLOW_CELL && y < (cy + 1) * GLOW_CELL)) return;
-    // It fills the screen at its zoom, the set is about 2.5 of the 4 units wide
-    const float px = static_cast<float>(state.screen_w * state.zoom_factor / r.zoom() * 0.625);
-    if (!(px < GLOW_VISIBLE_PX)) return;
+    if (!(spot.x >= cx * GLOW_CELL && spot.x < (cx + 1) * GLOW_CELL && spot.y >= cy * GLOW_CELL
+          && spot.y < (cy + 1) * GLOW_CELL))
+        return;
+    // Already there: from the view before, or the scan started over (after "where am I")
+    for (int i = 0; i < glow_count; ++i) {
+        if (std::abs(glow_spots[i].x - spot.x) < 0.5f && std::abs(glow_spots[i].y - spot.y) < 0.5f) {
+            glow_spots[i].stale = false;
+            return;
+        }
+    }
     // Sorted, biggest first
     int i = std::min(glow_count, GLOW_MAX - 1);
-    if (glow_count == GLOW_MAX && px <= glow_spots[i].px) return;
-    for (; i > 0 && glow_spots[i - 1].px < px; --i) glow_spots[i] = glow_spots[i - 1];
-    glow_spots[i] = {x, y, px};
+    if (glow_count == GLOW_MAX && spot.px <= glow_spots[i].px) return;
+    for (; i > 0 && glow_spots[i - 1].px < spot.px; --i) glow_spots[i] = glow_spots[i - 1];
+    glow_spots[i] = spot;
     glow_count = std::min(glow_count + 1, GLOW_MAX);
+    // Shown right away, not only once the whole screen is scanned
+    state.needs_redraw = true;
+}
+
+// The view changed: the spots move along, the scan starts over
+void glow_view_changed() {
+    if (glow_cell >= 0) finder.stop();
+    glow_cell = -1;
+    glow_done = false;
+    glow_calculation = state.calculation_id;
+    // Moved by the difference of the centers (exact, in new pixels) and scaled around the screen center
+    const double pixel = glow_pixel();
+    const double ratio = state.zoom_factor / glow_zoom;
+    const double dx = (glow_center.real - state.center.real).to_double() / pixel;
+    const double dy = (glow_center.imag - state.center.imag).to_double() / pixel;
+    glow_center = state.center;
+    glow_zoom = state.zoom_factor;
+    const int before = glow_count;
+    glow_keep([=](GlowSpot& s) {
+        s.x = (s.x - state.screen_w * 0.5) * ratio + state.screen_w * 0.5 + dx;
+        s.y = (s.y - state.screen_h * 0.5) * ratio + state.screen_h * 0.5 + dy;
+        s.px *= static_cast<float>(ratio);
+        s.stale = true;
+        return glow_visible(s);
+    });
+    if (before > 0) state.needs_redraw = true;
 }
 
 void glow_clear() {
@@ -1397,16 +1482,14 @@ void glow_clear() {
     glow_count = 0;
     glow_done = false;
     glow_calculation = state.calculation_id;
+    glow_center = state.center;
+    glow_zoom = state.zoom_factor;
 }
 
 // Core0 work: one slice of the scan. Returns false when there's nothing to do.
 bool glow_work(bool (*interrupt)()) {
     if (!glow_on) return false;
-    if (state.calculation_id != glow_calculation) {
-        const bool shown = glow_count > 0;
-        glow_clear();
-        if (shown) state.needs_redraw = true;
-    }
+    if (state.calculation_id != glow_calculation) glow_view_changed();
     if (glow_done || state.calculating) return false;
     if (glow_cell < 0) glow_next_cell();
     const uint32_t until = now_ms() + CORE0_WORK_MS;
@@ -1420,31 +1503,159 @@ bool glow_work(bool (*interrupt)()) {
 }
 
 bool glow_shown() {
-    return glow_on && glow_done && glow_count > 0 && !menu::is_open();
+    return glow_on && glow_count > 0 && !menu::is_open();
+}
+
+// The scan of the view isn't done yet (or waits for the view)
+bool glow_scanning() {
+    return glow_on && !glow_done;
+}
+
+// Bigger minibrots glow bigger and brighter: 0 for the tiniest, 1 at the size where they become visible
+float glow_strength(const GlowSpot& s) {
+    return std::clamp(std::log2(s.px * 32768.0f / GLOW_VISIBLE_PX) / 15.0f, 0.0f, 1.0f);
+}
+float glow_radius(const GlowSpot& s) { return 6.0f + 16.0f * glow_strength(s); }
+
+// The hue of GLOW_COLOR. By size the tiny ones are vivid, towards the visible size it fades to white: those are
+// bright and big already.
+Color glow_color(const GlowSpot& s) {
+    if (!glow_by_size) return GLOW_COLOR;
+    const float strength = glow_strength(s);
+    const float saturation = 1.0f - 0.85f * strength * strength;
+    const uint16_t c = palette::hsv(200.0f / 360.0f, saturation, 1.0f);
+    return {static_cast<uint8_t>((c >> 11) * 255 / 31), static_cast<uint8_t>(((c >> 5) & 63) * 255 / 63),
+            static_cast<uint8_t>((c & 31) * 255 / 31)};
 }
 
 void draw_glow() {
     menu::set_clip({0, 0, SCREEN_W, SCREEN_H});
     for (int i = 0; i < glow_count; ++i) {
         const GlowSpot& s = glow_spots[i];
-        // Bigger minibrots glow bigger and brighter: 0 for the tiniest, 1 at the size where they become visible
-        const float strength = std::clamp(std::log2(s.px * 32768.0f / GLOW_VISIBLE_PX) / 15.0f, 0.0f, 1.0f);
-        const float radius = 6.0f + 16.0f * strength;
-        if (!menu::visible({static_cast<int>(s.x - radius), static_cast<int>(s.y - radius),
+        const float x = static_cast<float>(s.x), y = static_cast<float>(s.y);
+        const float strength = glow_strength(s);
+        const float radius = glow_radius(s);
+        if (!menu::visible({static_cast<int>(x - radius), static_cast<int>(y - radius),
                             static_cast<int>(2 * radius) + 2, static_cast<int>(2 * radius) + 2}))
             continue;
         // Discs on top of each other: a fade towards the edge
         constexpr int LAYERS = 8;
         const int alpha = static_cast<int>(30 + 24 * strength);
-        for (int k = LAYERS; k >= 1; --k) menu::disc(s.x, s.y, radius * k / LAYERS, GLOW_COLOR, alpha);
+        const Color color = glow_color(s);
+        for (int k = LAYERS; k >= 1; --k) menu::disc(x, y, radius * k / LAYERS, color, alpha);
     }
 }
+
 
 int glow_get(int) { return glow_on; }
 void glow_set(int, int v) {
     glow_on = v != 0;
     glow_clear();
     state.needs_redraw = true;
+}
+bool glow_enabled(int) { return glow_on; }
+int glow_size_get(int) { return glow_by_size; }
+void glow_size_set(int, int v) {
+    glow_by_size = v != 0;
+    state.needs_redraw = true;
+}
+
+// The glowing minibrot closest to the center, -1 if there is none (with a toast)
+int glow_closest() {
+    int best = -1;
+    double best_distance = 0;
+    for (int i = 0; i < glow_count; ++i) {
+        const double dx = glow_spots[i].x - state.screen_w * 0.5, dy = glow_spots[i].y - state.screen_h * 0.5;
+        if (best < 0 || dx * dx + dy * dy < best_distance) {
+            best = i;
+            best_distance = dx * dx + dy * dy;
+        }
+    }
+    if (best < 0) toast(glow_scanning() ? "None found yet" : "No minibrots found");
+    return best;
+}
+
+// Framed like the whole set at zoom 1, centered at -0.5 in its coordinates (like search_done())
+Coordinate glow_framed(const GlowSpot& s) {
+    const std::complex<double> offset = -0.5 / s.scale;
+    Coordinate c = glow_point(s.x, s.y);
+    c.real += Fixed(offset.real());
+    c.imag += Fixed(offset.imag());
+    return c;
+}
+
+// Centers the view on the minibrot
+void glow_snap_to(const GlowSpot& s) {
+    remember_view();
+    fractalis.move_to(glow_point(s.x, s.y));
+}
+
+void glow_snap(int) {
+    const int i = glow_closest();
+    if (i >= 0) glow_snap_to(glow_spots[i]);
+}
+
+// Straight there, it fills the screen
+void glow_jump(int) {
+    const int i = glow_closest();
+    if (i < 0) return;
+    const GlowSpot s = glow_spots[i];
+    remember_view();
+    fractalis.set_view(glow_framed(s), std::abs(s.scale));
+}
+
+// Centered on it, auto zoom dives there
+void glow_dive(int) {
+    const int i = glow_closest();
+    if (i < 0) return;
+    const GlowSpot s = glow_spots[i];
+    remember_view();
+    fractalis.move_to(glow_framed(s));
+    autoZoom.set_target(state.center, std::abs(s.scale));
+    target_period = s.period;
+    if (!state.auto_zoom) set_auto_zoom(true);
+}
+
+/**
+ * The tour: from the biggest to the smallest, each press the next one. In that order the ones of the same size
+ * (the mirror images above and below the real axis) go by their place on screen. The minibrot of the last press
+ * is remembered by its coordinate: after the snap it's at the center, the others moved along.
+ */
+Coordinate glow_tour_at;
+float glow_tour_px = 0;
+double glow_tour_zoom = 0;  // 0: no tour yet at this zoom
+
+// a comes before b in the tour
+bool glow_tour_before(float a_px, double a_x, double a_y, const GlowSpot& b) {
+    if (a_px != b.px) return a_px > b.px;
+    if (std::abs(a_y - b.y) > 0.5) return a_y < b.y;
+    return a_x < b.x - 0.5;
+}
+
+void glow_next(int) {
+    double last_x = 0, last_y = 0;
+    const bool touring = glow_tour_zoom == state.zoom_factor;
+    if (touring) {
+        last_x = (glow_tour_at.real - state.center.real).to_double() / glow_pixel() + state.screen_w * 0.5;
+        last_y = (glow_tour_at.imag - state.center.imag).to_double() / glow_pixel() + state.screen_h * 0.5;
+    }
+    int next = -1, first = -1;
+    for (int i = 0; i < glow_count; ++i) {
+        const GlowSpot& s = glow_spots[i];
+        if (first < 0 || glow_tour_before(s.px, s.x, s.y, glow_spots[first])) first = i;
+        if (touring && !glow_tour_before(glow_tour_px, last_x, last_y, s)) continue;
+        if (next < 0 || glow_tour_before(s.px, s.x, s.y, glow_spots[next])) next = i;
+    }
+    if (next < 0) next = first;  // after the smallest the biggest again
+    if (next < 0) {
+        toast(glow_scanning() ? "None found yet" : "No minibrots found");
+        return;
+    }
+    const GlowSpot s = glow_spots[next];
+    glow_tour_at = glow_point(s.x, s.y);
+    glow_tour_px = s.px;
+    glow_tour_zoom = state.zoom_factor;
+    glow_snap_to(s);
 }
 
 // ---- Where am I ----
@@ -2036,9 +2247,22 @@ constexpr menu::Item depth(int i) {
 }
 constexpr menu::Item FINDER_ITEMS[] = {
     menu::toggle("Glow", glow_get, glow_set, "A soft glow over minibrots too small to see"),
+    menu::toggle("Color by size", glow_size_get, glow_size_set, "The smaller, the more saturated the glow")
+        .when(glow_enabled),
+    menu::action("Jump to closest found", glow_jump, "Straight there: the glowing minibrot nearest the center")
+        .when(glow_enabled).closing(),
+    menu::action("Dive to closest found", glow_dive, "Auto zoom dives to the glowing minibrot nearest the center")
+        .when(glow_enabled).closing(),
+    menu::action("Snap to closest found", glow_snap, "Centers the view on the glowing minibrot nearest the center")
+        .when(glow_enabled).closing(),
+    menu::action("Next found", glow_next, "Centers the next one, from the biggest to the smallest")
+        .when(glow_enabled).closing(),
     depth(0), depth(1), depth(2), depth(3), depth(4), depth(5), depth(6)};
-static_assert(sizeof(FINDER_ITEMS) / sizeof(FINDER_ITEMS[0]) == 1 + FINDER_DEPTHS, "a row for every depth");
-constexpr menu::Page FINDER_PAGE = {"Minibrots", &ICON_FINDER, VIEWS_COLOR, FINDER_ITEMS, 1 + FINDER_DEPTHS};
+constexpr int GLOW_ROWS_IN_MENU = 6;
+static_assert(sizeof(FINDER_ITEMS) / sizeof(FINDER_ITEMS[0]) == GLOW_ROWS_IN_MENU + FINDER_DEPTHS,
+              "a row for every depth");
+constexpr menu::Page FINDER_PAGE = {"Minibrots", &ICON_FINDER, VIEWS_COLOR, FINDER_ITEMS,
+                                    GLOW_ROWS_IN_MENU + FINDER_DEPTHS};
 
 constexpr menu::Item SOLID_ITEMS[] = {
     menu::choice("Hue", solid_get, solid_set, solid_count, solid_text,
@@ -2221,21 +2445,27 @@ void quick(int button) {
 
 // ---- Info overlay ----
 
-// The texts of the current frame. Collected once per frame, then drawn into every strip they touch.
+// The texts of the current frame. Collected once per frame, then drawn into every strip they touch. Their
+// characters share one pool, most texts are short.
+constexpr int OVERLAY_TEXT_LENGTH = 220;  // the longest one, with its 0
 struct OverlayText {
-    char text[220];
+    uint16_t text;  // in overlay_pool
+    int16_t width;  // of the widest line
     Point position;
     const bitmap::font_t* font;
     int height;  // all lines and the shadow
 };
-constexpr int MAX_OVERLAY_TEXTS = 12;
+constexpr int MAX_OVERLAY_TEXTS = 20;
 OverlayText overlay_texts[MAX_OVERLAY_TEXTS];
 int overlay_text_count = 0;
+char overlay_pool[1024];
+int overlay_pool_used = 0;
 
 // What the last frame showed
 struct Shown {
     bool overlay, hud, quick, toast;
     uint32_t seconds_to_step;
+    bool scanning;
 } shown;
 
 bool hud_visible(uint32_t now) {
@@ -2244,14 +2474,31 @@ bool hud_visible(uint32_t now) {
 }
 
 void add_text(PicoGraphics& g, const char* text, Point position) {
-    if (overlay_text_count >= MAX_OVERLAY_TEXTS || *text == '\0') return;
+    const int length = static_cast<int>(strnlen(text, OVERLAY_TEXT_LENGTH - 1));
+    if (overlay_text_count >= MAX_OVERLAY_TEXTS || length == 0
+            || overlay_pool_used + length + 1 > static_cast<int>(sizeof(overlay_pool)))
+        return;
     OverlayText& t = overlay_texts[overlay_text_count++];
-    snprintf(t.text, sizeof(t.text), "%s", text);
+    t.text = static_cast<uint16_t>(overlay_pool_used);
+    memcpy(overlay_pool + overlay_pool_used, text, length);
+    overlay_pool[overlay_pool_used + length] = '\0';
+    overlay_pool_used += length + 1;
     t.position = position;
     t.font = g.bitmap_font;
     int lines = 1;
     for (const char* c = text; *c; ++c) lines += *c == '\n';
     t.height = lines * t.font->height + 1;
+    t.width = 0;
+    for (const char* line = overlay_pool + t.text; *line;) {
+        const char* end = strchr(line, '\n');
+        char buffer[OVERLAY_TEXT_LENGTH];
+        const size_t n = end ? static_cast<size_t>(end - line) : strlen(line);
+        memcpy(buffer, line, n);
+        buffer[n] = '\0';
+        t.width = static_cast<int16_t>(std::max<int>(t.width, g.measure_text(buffer, 1) + 1));
+        if (!end) break;
+        line = end + 1;
+    }
 }
 
 void render_overlay(PicoGraphics& g, uint32_t now) {
@@ -2288,7 +2535,7 @@ void render_overlay(PicoGraphics& g, uint32_t now) {
     format_coordinate(state.center.real, decimals, line_length, real_text, sizeof(real_text));
     format_coordinate(state.center.imag, decimals, line_length, imag_text, sizeof(imag_text));
 
-    char coord_text[sizeof(OverlayText::text)];
+    char coord_text[OVERLAY_TEXT_LENGTH];
     snprintf(coord_text, sizeof(coord_text), "Coordinates:\n%s\n%s", real_text, imag_text);
     int coord_lines = 1;
     for (const char* c = coord_text; *c; ++c) coord_lines += *c == '\n';
@@ -2300,6 +2547,14 @@ void render_overlay(PicoGraphics& g, uint32_t now) {
         snprintf(zoom_text, sizeof(zoom_text), "Zoom: x%.1e", state.zoom_factor);
 
     int info_y = margin * 3 + font8_height;
+    char where[OVERLAY_TEXT_LENGTH];
+    where_text(where, sizeof(where));
+    if (where[0]) {
+        add_text(g, where, Point(margin, info_y));
+        info_y += font8_height + margin;
+        for (const char* c = where; *c; ++c) info_y += *c == '\n' ? font8_height : 0;
+    }
+
     add_text(g, coord_text, Point(margin, info_y));
     info_y += font8_height * coord_lines + margin;
     add_text(g, zoom_text, Point(margin, info_y));
@@ -2321,14 +2576,6 @@ void render_overlay(PicoGraphics& g, uint32_t now) {
         add_text(g, target_text, Point(margin, info_y));
     }
 
-    char where[sizeof(OverlayText::text)];
-    where_text(where, sizeof(where));
-    if (where[0]) {
-        info_y += font8_height + margin;
-        add_text(g, where, Point(margin, info_y));
-        for (const char* c = where; *c; ++c) info_y += *c == '\n' ? font8_height : 0;
-    }
-
     if (state.auto_zoom) {
         info_y += font8_height + margin;
         char auto_zoom_text[40];
@@ -2340,6 +2587,45 @@ void render_overlay(PicoGraphics& g, uint32_t now) {
             snprintf(auto_zoom_text, sizeof(auto_zoom_text), "Auto Zoom: ON");
         }
         add_text(g, auto_zoom_text, Point(margin, info_y));
+    }
+
+    // The glow scan: redrawn with every minibrot it finds
+    if (glow_scanning() || (glow_on && glow_count > 0)) {
+        info_y += font8_height + margin;
+        char glow_text[60];
+        if (glow_scanning()) {
+            snprintf(glow_text, sizeof(glow_text), "Finding minibrots... %d", glow_count);
+        } else {
+            char zoom[16];
+            format_deep_zoom(zoom, sizeof(zoom), std::abs(glow_spots[0].scale));
+            snprintf(glow_text, sizeof(glow_text), "Minibrots: %d, biggest p%d at %s", glow_count,
+                     glow_spots[0].period, zoom);
+        }
+        add_text(g, glow_text, Point(margin, info_y));
+    }
+}
+
+// The period next to the biggest glowing minibrots, right of the glow (left at the right edge)
+void add_glow_labels(PicoGraphics& g) {
+    constexpr int LABELS = 5;
+    g.set_font(&font6);
+    for (int i = 0; i < glow_count && i < LABELS; ++i) {
+        const GlowSpot& s = glow_spots[i];
+        char label[8];
+        snprintf(label, sizeof(label), "p%d", s.period);
+        const int width = g.measure_text(label, 1);
+        const float radius = glow_radius(s) * 0.6f;
+        int x = static_cast<int>(s.x + radius);
+        if (x + width >= SCREEN_W) x = static_cast<int>(s.x - radius) - width;
+        const int y = static_cast<int>(s.y) - font6.height / 2;
+        // Not over the info texts (or another label)
+        bool free = true;
+        for (int k = 0; k < overlay_text_count && free; ++k) {
+            const OverlayText& t = overlay_texts[k];
+            free = x + width < t.position.x || x > t.position.x + t.width || y + font6.height < t.position.y
+                || y > t.position.y + t.height;
+        }
+        if (free) add_text(g, label, Point(x, y));
     }
 }
 
@@ -2353,11 +2639,11 @@ void draw_overlay_texts(PicoGraphics& g, int first_row, int rows) {
         // Only the lines in this strip: drawing a text goes through all of its pixels, also the clipped ones
         const int line_height = t.font->height;
         int line_y = t.position.y;
-        for (const char* line = t.text; *line;) {
+        for (const char* line = overlay_pool + t.text; *line;) {
             const char* end = strchr(line, '\n');
             size_t length = end ? static_cast<size_t>(end - line) : strlen(line);
             if (line_y < first_row + rows && line_y + line_height + 1 > first_row) {
-                char buffer[sizeof(OverlayText::text)];
+                char buffer[OVERLAY_TEXT_LENGTH];
                 memcpy(buffer, line, length);
                 buffer[length] = '\0';
                 g.set_pen(0, 0, 0);
@@ -2515,7 +2801,8 @@ bool update(uint32_t now, uint32_t elapsed_ms) {
     // Redraw when the overlay changes by itself
     if (shown.overlay != overlay_wanted() || shown.hud != hud_visible(now) || shown.quick != quick_shown
             || shown.toast != toast_active(now)
-            || (shown.hud && state.auto_zoom && shown.seconds_to_step != autoZoom.seconds_to_next_step(now))) {
+            || (shown.hud && state.auto_zoom && shown.seconds_to_step != autoZoom.seconds_to_next_step(now))
+            || (shown.hud && shown.scanning != glow_scanning())) {
         state.needs_redraw = true;
     }
 
@@ -2606,8 +2893,9 @@ void led_color(uint8_t& r, uint8_t& g, uint8_t& b) {
 void prepare_frame(PicoGraphics& g) {
     const uint32_t now = now_ms();
     overlay_text_count = 0;
+    overlay_pool_used = 0;
     shown = {overlay_wanted(), hud_visible(now), quick_shown, toast_active(now),
-             autoZoom.seconds_to_next_step(now)};
+             autoZoom.seconds_to_next_step(now), glow_scanning()};
     if (orbit_shown() && (!orbit_ready || memcmp(&orbit_center, &state.center, sizeof(Coordinate)) != 0)) {
         calculate_orbit();
     }
@@ -2617,6 +2905,7 @@ void prepare_frame(PicoGraphics& g) {
     } else if (shown.hud || shown.quick) {
         render_overlay(g, now);
     }
+    if (glow_shown()) add_glow_labels(g);
 }
 
 void draw_strip(PicoGraphics& g, uint16_t* strip, int first_row, int rows) {

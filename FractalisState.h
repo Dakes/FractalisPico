@@ -223,6 +223,7 @@ public:
     volatile uint16_t completed_limit;
 
 private:
+    PixelState* pixels;  // all rows, pixelState points into it
     PixelState* row_buffer;
     PixelState* row_buffer2;
     bool* row_done;

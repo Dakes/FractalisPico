@@ -10,9 +10,11 @@ FractalisState::FractalisState(int width, int height)
 
     center = {-0.5, 0};
 
+    // One block: a block per row would cost 8 bytes of heap each
+    pixels = new PixelState[screen_w * screen_h];
     pixelState = new PixelState*[screen_h];
     for (int i = 0; i < screen_h; ++i) {
-        pixelState[i] = new PixelState[screen_w];
+        pixelState[i] = pixels + i * screen_w;
         for (int j = 0; j < screen_w; ++j) {
             pixelState[i][j].clear();
         }
@@ -24,10 +26,8 @@ FractalisState::FractalisState(int width, int height)
 }
 
 FractalisState::~FractalisState() {
-    for (int i = 0; i < screen_h; ++i) {
-        delete[] pixelState[i];
-    }
     delete[] pixelState;
+    delete[] pixels;
     delete[] row_buffer;
     delete[] row_buffer2;
     delete[] row_done;
