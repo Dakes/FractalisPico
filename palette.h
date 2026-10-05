@@ -113,11 +113,12 @@ public:
     void render(PixelState* const* pixels, int width, int height, uint16_t* frame_buffer) const;
     // Only the rows first_row .. first_row + rows - 1, into a buffer of that many rows
     // content: see FractalisState::content, pixels outside of it that aren't calculated yet show its edge
+    // zoom_preview: see FractalisState::zoom_preview
     void render_rows(PixelState* const* pixels, int width, int height, int first_row, int rows,
-                     uint16_t* out_rows, const ScreenRect* content = nullptr) const;
-    // The same with its own scratch space (2 * width), so it can run alongside the drawing of the frames
+                     uint16_t* out_rows, const ScreenRect* content = nullptr, bool zoom_preview = false) const;
+    // The same with its own scratch space (3 * width), so it can run alongside the drawing of the frames
     void render_rows(PixelState* const* pixels, int width, int height, int first_row, int rows,
-                     uint16_t* out_rows, const ScreenRect* content, PixelState* scratch) const;
+                     uint16_t* out_rows, const ScreenRect* content, bool zoom_preview, PixelState* scratch) const;
 
 private:
     int current;

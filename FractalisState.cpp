@@ -69,6 +69,7 @@ ScreenRect FractalisState::valid_bounds() const {
 
 void FractalisState::resetPixelComplete() {
     content = {0, 0, 0, 0};
+    zoom_preview = false;
     for (int y = 0; y < screen_h; ++y) {
         for (int x = 0; x < screen_w; ++x) {
             pixelState[y][x].clear();
@@ -124,6 +125,7 @@ void FractalisState::scalePixelState(double ratio) {
     // Zooming in, the blended pixels would end up between the grid points. Zooming out they are better left to the
     // live blending: stored, every zoom out would add another ring of coarse blends.
     if (ratio < 1.0) store_blends();
+    zoom_preview = true;
     content = valid_bounds();
     content = {std::max(0, static_cast<int>(std::ceil(target(content.x0, cx)))),
                std::max(0, static_cast<int>(std::ceil(target(content.y0, cy)))),
@@ -135,6 +137,9 @@ void FractalisState::scalePixelState(double ratio) {
     // When zooming out it is the other way round. Source rows are copied first, so they can't be overwritten while
     // being read, rows that were already overwritten are not used as a source.
     std::fill(row_done, row_done + screen_h, false);
+    // Source rows in the buffers. The two rows at the center both need the original of the other one: the second
+    // of them reuses the copies of the first.
+    int buffered0 = -1, buffered1 = -1;
     for (int n = 0; n < screen_h; ++n) {
         int k = ratio < 1.0 ? n : screen_h - 1 - n;  // distance rank from the outer edge
         int y = (k % 2 == 0) ? k / 2 : screen_h - 1 - k / 2;
@@ -149,10 +154,14 @@ void FractalisState::scalePixelState(double ratio) {
         int y0 = std::max(0, static_cast<int>(std::floor(sy)));
         int y1 = std::min(screen_h - 1, y0 + 1);
         float fy = std::max(0.0f, std::min(sy - y0, 1.0f));
-        if (row_done[y0] && y0 != y) { y0 = y1; }
-        if (row_done[y1] && y1 != y) { y1 = y0; }
-        memcpy(row_buffer, pixelState[y0], screen_w * sizeof(PixelState));
-        memcpy(row_buffer2, pixelState[y1], screen_w * sizeof(PixelState));
+        if (y0 != buffered0 || y1 != buffered1) {
+            buffered0 = y0;
+            buffered1 = y1;
+            if (row_done[y0] && y0 != y) { y0 = y1; }
+            if (row_done[y1] && y1 != y) { y1 = y0; }
+            memcpy(row_buffer, pixelState[y0], screen_w * sizeof(PixelState));
+            memcpy(row_buffer2, pixelState[y1], screen_w * sizeof(PixelState));
+        }
         int wy = static_cast<int>(fy * 256.0f);
 
         for (int x = 0; x < screen_w; ++x) {

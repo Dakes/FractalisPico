@@ -80,8 +80,9 @@ uint32_t system_clock_khz() {
 
 // SCREEN.BMP on the USB drive. With its own scratch space: it runs while core0 draws a frame, or on core1.
 void usb_image_row(int y, uint16_t* row) {
-    static PixelState scratch[2 * width];
-    color_palette.render_rows(state.pixelState, state.screen_w, state.screen_h, y, 1, row, &state.content, scratch);
+    static PixelState scratch[3 * width];
+    color_palette.render_rows(state.pixelState, state.screen_w, state.screen_h, y, 1, row, &state.content,
+                              state.zoom_preview, scratch);
     for (int x = 0; x < state.screen_w; ++x) row[x] = static_cast<uint16_t>((row[x] >> 8) | (row[x] << 8));
 }
 
@@ -297,7 +298,7 @@ void update_display() {
 
 void draw_strip(uint16_t* strip, int first_row, int rows) {
     color_palette.render_rows(state.pixelState, state.screen_w, state.screen_h, first_row, rows, strip,
-                              &state.content);
+                              &state.content, state.zoom_preview);
     ui::draw_strip(display, strip, first_row, rows);
 }
 

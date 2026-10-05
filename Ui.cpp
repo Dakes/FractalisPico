@@ -437,7 +437,7 @@ void draw_thumbnail(int first_row, int rows, uint16_t* out) {
         memset(sums, 0, sizeof(sums));
         for (int dy = 0; dy < SCALE; ++dy) {
             color_palette.render_rows(state.pixelState, state.screen_w, state.screen_h, ty * SCALE + dy, 1, row,
-                                      &state.content);
+                                      &state.content, state.zoom_preview);
             for (int x = 0; x < SCREEN_W; ++x) {
                 uint16_t v = static_cast<uint16_t>((row[x] >> 8) | (row[x] << 8));
                 uint16_t* sum = sums[x / SCALE];

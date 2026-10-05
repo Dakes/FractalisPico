@@ -423,14 +423,44 @@ void Palette::render(PixelState* const* pixels, int width, int height, uint16_t*
     render_rows(pixels, width, height, 0, height, frame_buffer);
 }
 
+/**
+ * Slope at p along one axis while a zoom preview gets calculated (see FractalisState::zoom_preview): from the
+ * neighbor of the same kind (calculated or still the preview) before or after p. A calculated pixel among the
+ * preview takes the slope of the preview around it. slope comes in as the one towards next.
+ */
+static void preview_slope(const PixelState& p, const PixelState& previous, const PixelState& next, float& slope) {
+    const bool calculated = p.isComplete();
+    if (!next.showsColor() || next.isComplete() == calculated) return;
+    if (previous.showsColor() && previous.isComplete() == calculated) {
+        slope = static_cast<float>(p.position()) - static_cast<float>(previous.position());
+    } else if (calculated && previous.showsColor()) {
+        slope = 0.5f * (static_cast<float>(next.position()) - static_cast<float>(previous.position()));
+    }
+}
+
+// Grid step from which on a zoom preview is replaced by the calculated points, coarser grids weigh less (squared)
+constexpr int PREVIEW_BLEND_STEP = 2;
+
 // The value a pixel is drawn with: its own, or blended from the calculated points around it if it isn't calculated
 // yet. The image gets sharper with every finer grid (see Fractalis::next_in_order()).
 static PixelState displayed(PixelState* const* pixels, int width, int height, int x, int y,
-                            const ScreenRect* content) {
+                            const ScreenRect* content, bool zoom_preview) {
     const PixelState& own = pixels[y][x];
-    if (own.isValid()) return own;
-    PixelState p = own;
     uint32_t position;
+    if (own.isValid()) {
+        if (!zoom_preview || own.isComplete() || !own.hasPosition()) return own;
+        // A zoom preview: blended towards the calculated points around it like the pixels that aren't calculated,
+        // more the finer their grid. The preview has the detail until then, the calculated points don't stand out.
+        int step;
+        if (interpolated_position(pixels, width, height, x, y, position, true, &step) != Blend::COLOR) return own;
+        const int64_t ratio = PREVIEW_BLEND_STEP * 16 / std::max(step, PREVIEW_BLEND_STEP);
+        const int64_t weight = ratio * ratio;
+        PixelState p = own;
+        p.setPosition(static_cast<uint32_t>(own.position()
+                                            + ((static_cast<int64_t>(position) - own.position()) * weight >> 8)));
+        return p;
+    }
+    PixelState p = own;
     Blend blend = interpolated_position(pixels, width, height, x, y, position);
     if (blend == Blend::COLOR) {
         p.setEscaped(position);
@@ -465,22 +495,25 @@ static PixelState displayed(PixelState* const* pixels, int width, int height, in
 }
 
 void Palette::render_rows(PixelState* const* pixels, int width, int height, int first_row, int rows,
-                          uint16_t* out_rows, const ScreenRect* content) const {
+                          uint16_t* out_rows, const ScreenRect* content, bool zoom_preview) const {
     // Static: too big for the stack, and only core0 draws the frames
-    static PixelState rows_buffer[2 * MAX_WIDTH];
-    render_rows(pixels, width, height, first_row, rows, out_rows, content, rows_buffer);
+    static PixelState rows_buffer[3 * MAX_WIDTH];
+    render_rows(pixels, width, height, first_row, rows, out_rows, content, zoom_preview, rows_buffer);
 }
 
 void Palette::render_rows(PixelState* const* pixels, int width, int height, int first_row, int rows,
-                          uint16_t* out_rows, const ScreenRect* content, PixelState* scratch) const {
+                          uint16_t* out_rows, const ScreenRect* content, bool zoom_preview,
+                          PixelState* scratch) const {
     const int64_t start = static_cast<int64_t>(range_start);
     if (width > MAX_WIDTH) return;
-    // The displayed values of the row and the one below, for the shading
-    PixelState* row = scratch;
-    PixelState* below = scratch + width;
+    // The displayed values of the row and the ones above and below, for the shading
+    PixelState* above = scratch;
+    PixelState* row = scratch + width;
+    PixelState* below = scratch + 2 * width;
     auto fill = [&](PixelState* out, int y) {
-        for (int x = 0; x < width; ++x) out[x] = displayed(pixels, width, height, x, y, content);
+        for (int x = 0; x < width; ++x) out[x] = displayed(pixels, width, height, x, y, content, zoom_preview);
     };
+    if (zoom_preview && first_row > 0) fill(above, first_row - 1);
     fill(row, first_row);
     for (int y = first_row; y < first_row + rows; ++y) {
         fill(below, y + 1 < height ? y + 1 : y - 1);
@@ -526,6 +559,13 @@ void Palette::render_rows(PixelState* const* pixels, int width, int height, int 
                 float dir_x = x + 1 < width ? 1.0f : -1.0f;
                 float gx = right.showsColor() ? dir_x * (static_cast<float>(right.position()) - pos) : 0.0f;
                 float gy = below[x].showsColor() ? dir_y * (static_cast<float>(below[x].position()) - pos) : 0.0f;
+                if (zoom_preview) {
+                    // The preview is off from the calculated pixels by a little, and only the direction of the
+                    // slope counts: between a calculated pixel and the preview it would flip the light, every
+                    // calculated pixel a dot. So the slope is taken between pixels of the same kind.
+                    if (x > 0 && x + 1 < width) preview_slope(p, row[x - 1], right, gx);
+                    if (y > 0 && y + 1 < height) preview_slope(p, above[x], below[x], gy);
+                }
                 float length_sq = gx * gx + gy * gy;
                 if (edges) {
                     // Palette entries per pixel: from a 16th of the palette per pixel it starts, full at a third. Next to
@@ -562,7 +602,10 @@ void Palette::render_rows(PixelState* const* pixels, int width, int height, int 
             // The display expects big endian
             out[x] = static_cast<uint16_t>((c >> 8) | (c << 8));
         }
-        std::swap(row, below);
+        PixelState* const free_row = above;
+        above = row;
+        row = below;
+        below = free_row;
     }
 }
 

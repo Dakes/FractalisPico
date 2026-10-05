@@ -1674,10 +1674,10 @@ void Fractalis::store_result(int x, int y, const PixelState& result, const Pixel
 
     if (ss_pass) {
         target = result;
-    } else if (!undecided_in_set_ && result.isInSet() && !result.showsColor() && info.ran_out
-               && target.showsColor()) {
+    } else if (result.isInSet() && !result.showsColor() && info.ran_out && target.showsColor()) {
         // Undecided at this iteration limit: keep showing the zoom preview instead of black for now. Pixels that are
-        // proven to be in the set are black right away.
+        // proven to be in the set are black right away. Also with undecided pixels in the set: a zoom starts at a
+        // lower limit again, what escaped before would turn black and shrink once more.
         target.setInSetKeepingPreview();
     } else if (!undecided_in_set_ && result.isInSet() && !result.showsColor() && info.ran_out
                && !target.isValid()) {
@@ -2078,6 +2078,7 @@ void Fractalis::move_to(const Coordinate& center) {
     if (std::abs(dx) < state->screen_w && std::abs(dy) < state->screen_h) {
         // Moved by the nearest whole pixels, the rest is a fraction of a pixel: every pixel is calculated again
         state->shiftPixelState(-static_cast<int>(std::lround(dx)), -static_cast<int>(std::lround(dy)));
+        state->zoom_preview = false;
         for (int y = 0; y < state->screen_h; ++y) {
             for (int x = 0; x < state->screen_w; ++x) state->pixelState[y][x].markIncomplete();
         }
@@ -2115,6 +2116,8 @@ void Fractalis::set_supersampling(int samples) {
     LockGuard guard(lock);
     ss_samples = samples == 2 || samples == 3 || samples == 4 || samples == 6 || samples == 8 ? samples : 1;
     // The pixels only keep the mean of their samples, so everything is calculated again. The image stays as preview.
+    // The image of the same view: it needs no correction like a zoom preview
+    state->zoom_preview = false;
     for (int y = 0; y < state->screen_h; ++y) {
         for (int x = 0; x < state->screen_w; ++x) {
             state->pixelState[y][x].markIncomplete();
@@ -2137,6 +2140,8 @@ void Fractalis::set_supersample_right_away(bool on) {
     LockGuard guard(lock);
     ss_right_away = on;
     // Like a change of the supersampling: everything again, the image stays as preview
+    // The image of the same view: it needs no correction like a zoom preview
+    state->zoom_preview = false;
     for (int y = 0; y < state->screen_h; ++y) {
         for (int x = 0; x < state->screen_w; ++x) {
             state->pixelState[y][x].markIncomplete();
@@ -2147,6 +2152,8 @@ void Fractalis::set_supersample_right_away(bool on) {
 }
 
 void Fractalis::recalculate_all() {
+    // The image of the same view: it needs no correction like a zoom preview
+    state->zoom_preview = false;
     for (int y = 0; y < state->screen_h; ++y) {
         for (int x = 0; x < state->screen_w; ++x) {
             state->pixelState[y][x].markIncomplete();

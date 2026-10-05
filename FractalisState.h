@@ -123,10 +123,12 @@ inline const PixelState* nearest_calculated(PixelState* const* pixels, int width
  * Smoother than nearest_calculated(): the palette position blended between the 4 calculated points around the
  * pixel, on the finest grid where all of them are done. Points in the set count as black: if they weigh more than
  * the colored ones, the pixel is black.
+ * calculated: only points calculated in this pass count as done (not the preview of a zoom), step is set to the
+ * grid used.
  */
 enum class Blend { NONE, IN_SET, COLOR };  // no grid done around it yet / all 4 points in the set / position set
 inline Blend interpolated_position(PixelState* const* pixels, int width, int height, int x, int y,
-                                  uint32_t& position) {
+                                  uint32_t& position, bool calculated = false, int* used_step = nullptr) {
     const int cx = width / 2, cy = height / 2;
     for (int step = 2; step <= 64; step *= 2) {
         // The grid cell around the pixel
@@ -142,7 +144,7 @@ inline Blend interpolated_position(PixelState* const* pixels, int width, int hei
                 // Corners off the screen don't exist, the others must be calculated
                 if (xs[i] < 0 || xs[i] >= width || ys[j] < 0 || ys[j] >= height) continue;
                 const PixelState& p = pixels[ys[j]][xs[i]];
-                if (!p.isValid()) {
+                if (calculated ? !p.isComplete() : !p.isValid()) {
                     complete = false;
                     break;
                 }
@@ -156,6 +158,7 @@ inline Blend interpolated_position(PixelState* const* pixels, int width, int hei
             }
         }
         if (!complete) continue;
+        if (used_step) *used_step = step;
         if (weight_sum <= black) return Blend::IN_SET;
         position = static_cast<uint32_t>(sum / weight_sum);
         return Blend::COLOR;
@@ -193,6 +196,12 @@ public:
      * pixels in between would show as dots and blocks.
      */
     void store_blends();
+    /**
+     * The pixels that aren't calculated yet show a zoom preview (scalePixelState()): the shading takes the slope
+     * between pixels of the same kind, see Palette::render_rows(). Cleared when the preview is the image of the
+     * same view (see Fractalis::recalculate_all()).
+     */
+    volatile bool zoom_preview = false;
     Coordinate center;
     double zoom_factor;
     volatile bool auto_zoom;
