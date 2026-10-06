@@ -41,8 +41,9 @@ struct Settings {
     uint8_t gauge_shown;
     uint8_t here_shown;
     uint8_t time_shown;
+    uint8_t light_speed;  // time for a turn of the rotating light: option of the menu + 1, 0 = the default
     // The record fills its flash page now: new fields go here
-    uint8_t reserved[2];
+    uint8_t reserved[1];
 };
 static_assert(sizeof(Settings) == 240, "Settings must not contain padding");
 

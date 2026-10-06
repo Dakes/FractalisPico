@@ -68,7 +68,12 @@ constexpr float LIGHT_ANGLES[] = {-0.75f * PI, -0.25f * PI, 0.25f * PI, 0.75f * 
 const char* const LIGHT_NAMES[] = {"top left", "top right", "bottom right", "bottom left", "rotating"};
 constexpr int LIGHT_COUNT = sizeof(LIGHT_NAMES) / sizeof(LIGHT_NAMES[0]);
 constexpr int LIGHT_ROTATING = LIGHT_COUNT - 1;
-constexpr float LIGHT_ROTATION_SPEED = 2.0f * PI / 12.0f;  // radians per second: a turn in 12 s
+// Time for one turn of the rotating light
+const CycleSpeed LIGHT_TURNS[] = {{"96 s", 96.0f}, {"48 s", 48.0f}, {"24 s", 24.0f},
+                                  {"12 s", 12.0f}, {"6 s", 6.0f},   {"3 s", 3.0f}};
+constexpr int LIGHT_TURN_COUNT = sizeof(LIGHT_TURNS) / sizeof(LIGHT_TURNS[0]);
+constexpr int DEFAULT_LIGHT_TURN = 3;
+int light_turn = DEFAULT_LIGHT_TURN;
 int light = 0;
 float light_angle = LIGHT_ANGLES[0];
 
@@ -2017,6 +2022,11 @@ int light_get(int) { return light; }
 void light_set(int, int v) { set_light(v); }
 int light_count(int) { return LIGHT_COUNT; }
 const char* light_text(int, int option, char*, int) { return names(LIGHT_NAMES, option); }
+int light_turn_get(int) { return light_turn; }
+void light_turn_set(int, int v) { light_turn = v; }
+int light_turn_count(int) { return LIGHT_TURN_COUNT; }
+const char* light_turn_text(int, int option, char*, int) { return LIGHT_TURNS[option].name; }
+bool light_rotating(int) { return light == LIGHT_ROTATING; }
 // A dial with the sun where the light comes from
 void light_decor(int, int option, const Box& box) {
     const float cx = box.x + box.w / 2.0f, cy = box.y + box.h / 2.0f;
@@ -2350,6 +2360,8 @@ constexpr menu::Item LIGHT_ITEMS[] = {
     menu::toggle("Edge glow", edges_get, edges_set, "Bright outlines where the colors change fast"),
     menu::choice("Direction", light_get, light_set, light_count, light_text, "Where the light comes from")
         .live().decorated(light_decor, 12),
+    menu::choice("Rotation speed", light_turn_get, light_turn_set, light_turn_count, light_turn_text,
+                 "Time for one turn of the rotating light").live().when(light_rotating),
 };
 constexpr menu::Page LIGHT_PAGE = {"Light", &ICON_SUN, LIGHT_COLOR, LIGHT_ITEMS,
                                    sizeof(LIGHT_ITEMS) / sizeof(LIGHT_ITEMS[0])};
@@ -3186,7 +3198,7 @@ bool update(uint32_t now, uint32_t elapsed_ms) {
         animating = true;
     }
     if (light == LIGHT_ROTATING && color_palette.shading) {
-        light_angle += elapsed_ms * LIGHT_ROTATION_SPEED / 1000.0f;
+        light_angle += elapsed_ms * 2.0f * PI / (1000.0f * LIGHT_TURNS[light_turn].seconds);
         light_angle -= 2.0f * PI * std::floor(light_angle / (2.0f * PI));
         color_palette.set_light(light_angle);
         animating = true;
@@ -3287,6 +3299,7 @@ Settings current_settings() {
     s.supersample_right_away = fractalis.supersample_right_away();
     s.set_display_preview = !fractalis.undecided_in_set();
     s.color_cycle_speed = static_cast<uint8_t>(cycle_speed == DEFAULT_CYCLE_SPEED ? 0 : cycle_speed + 1);
+    s.light_speed = static_cast<uint8_t>(light_turn == DEFAULT_LIGHT_TURN ? 0 : light_turn + 1);
     memcpy(s.slots, legacy_slots, sizeof(s.slots));
     s.extra_look = extra_look();
     s.edge_glow = color_palette.edges;
@@ -3311,6 +3324,7 @@ void apply_settings(const Settings& s) {
     color_cycle = s.color_cycle < 3 ? static_cast<ColorCycle>(s.color_cycle) : ColorCycle::ALWAYS;
     cycle_speed = s.color_cycle_speed >= 1 && s.color_cycle_speed <= CYCLE_SPEED_COUNT ? s.color_cycle_speed - 1
                                                                                       : DEFAULT_CYCLE_SPEED;
+    light_turn = s.light_speed >= 1 && s.light_speed <= LIGHT_TURN_COUNT ? s.light_speed - 1 : DEFAULT_LIGHT_TURN;
     set_bands_id(s.bands);
     apply_trap_byte(s.orbit_trap);
     set_light(s.light < LIGHT_COUNT ? s.light : 0);
