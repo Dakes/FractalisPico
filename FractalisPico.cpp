@@ -148,13 +148,16 @@ int main() {
 
     // USB: the serial port of the log and the drive with the views (UsbDevice.cpp)
     stdio_init_all();
-    if (DEBUG) {
-        // Give a serial terminal a moment to connect, so the first messages aren't lost
-        uint32_t start = now_ms();
-        while (!stdio_usb_connected() && now_ms() - start < USB_WAIT_MS) {
-            sleep_ms(10);
-        }
+#if DEBUG
+    // Give a serial terminal a moment to connect, so the first messages aren't lost
+    const uint32_t start = now_ms();
+    while (!stdio_usb_connected() && now_ms() - start < USB_WAIT_MS) {
+        sleep_ms(10);
     }
+#else
+    // The log only in debug builds. The serial port stays (TinyUSB runs on, picotool -f resets through it), silent.
+    stdio_set_driver_enabled(&stdio_usb, false);
+#endif
     printf("Starting FractalisPico at %lu kHz, display SPI at %lu kHz, flash clock divider %lu, read delay %lu\n",
            static_cast<unsigned long>(clock_get_hz(clk_sys) / 1000),
            static_cast<unsigned long>(spi_get_baudrate(get_spi_pins(BG_SPI_FRONT).spi) / 1000),
@@ -164,7 +167,7 @@ int main() {
     led.set_brightness(20);
     printf("Display initialized\n");
 
-    // Statistics per view, for the statistics page of the menu (and printed with DEBUG)
+    // Statistics per view, for the statistics page of the menu (and printed to the serial log in debug builds)
     Fractalis::clock_us = time_us_64;
     enable_cycle_counter();
     Fractalis::cycle_counter = read_cycle_counter;

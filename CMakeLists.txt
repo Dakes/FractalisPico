@@ -133,6 +133,12 @@ target_compile_options(${NAME} PRIVATE
     $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release>>:-O2>
 )
 
+# Debug build: the log on the USB serial port, waits for a serial terminal at startup (see DEBUG in globals.h)
+option(FRACTALIS_DEBUG "Log on the USB serial port, wait for a terminal at startup" OFF)
+if (FRACTALIS_DEBUG)
+    target_compile_definitions(${NAME} PRIVATE DEBUG=1)
+endif()
+
 # Enable floating-point support in printf functions
 target_link_options(${PROJECT_NAME} PRIVATE -Wl,-u,_printf_float)
 

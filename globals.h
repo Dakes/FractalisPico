@@ -1,7 +1,14 @@
 #ifndef GLOBALS_H
 #define GLOBALS_H
 
-#define DEBUG true
+// Debug build: the log goes to the USB serial port, and at startup it waits up to USB_WAIT_MS for a serial terminal,
+// so the first messages aren't lost. Otherwise the port stays silent.
+// Off by default, switch it on with: cmake -B build -DFRACTALIS_DEBUG=ON (and back with =OFF)
+#ifndef DEBUG
+#define DEBUG 0
+#endif
+#define USB_WAIT_MS 1000
+
 // System clock. The RP2350 is specified for 150 MHz, but runs fine a good bit faster. 0 = don't change.
 // Above 200 MHz the core voltage goes up to 1.15 V and the flash gets a bigger clock divider.
 #define SYS_CLOCK_KHZ 250000
@@ -17,9 +24,6 @@
 #define LED_PIN_R 26
 #define LED_PIN_G 27
 #define LED_PIN_B 28
-
-// Wait this long for a serial terminal at startup when DEBUG is enabled
-#define USB_WAIT_MS 1000
 
 // The settings and the view are saved to the flash this long after the last button press, if anything changed
 #define SAVE_DELAY_MS 300000
