@@ -3080,6 +3080,12 @@ void factory_reset(int with_views) {
 void start(bool defaults) {
     bool loaded = settings::load(saved);
     fractalis.reset_view();
+    // Defaults of the device that differ from the ones of the classes: auto zoom waits for supersampling and gives
+    // 10 s to look at each view, every pixel gets 3 samples in every pass
+    autoZoom.set_full_quality(true);
+    autoZoom.set_pause(1);  // 10 s
+    fractalis.set_supersampling(3);
+    fractalis.set_supersample_right_away(true);
     factory = current_settings();
     if (defaults) {
         printf("B held: starting with the default settings\n");
