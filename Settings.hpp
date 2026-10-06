@@ -37,8 +37,12 @@ struct Settings {
     // Distance estimation and the solid color, like View::extra_look
     uint16_t extra_look;
     uint8_t edge_glow;
+    // Parts of the info overlay: the depth gauge, where the center is, how long the view took. 0: hidden.
+    uint8_t gauge_shown;
+    uint8_t here_shown;
+    uint8_t time_shown;
     // The record fills its flash page now: new fields go here
-    uint8_t reserved[5];
+    uint8_t reserved[2];
 };
 static_assert(sizeof(Settings) == 240, "Settings must not contain padding");
 

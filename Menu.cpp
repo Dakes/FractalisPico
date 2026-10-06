@@ -235,18 +235,17 @@ const Icon KEY_B = {{"####.", "#...#", "#...#", "####.", "#...#", "#...#", "####
 const Icon KEY_X = {{"#...#", "#...#", ".#.#.", "..#..", ".#.#.", "#...#", "#...#"}};
 const Icon KEY_Y = {{"#...#", "#...#", ".#.#.", "..#..", "..#..", "..#..", "..#.."}};
 
-// A key as a small light square with its letter, then what it does
-void draw_hint(const Icon& key, const char* what, int x, int y) {
-    round_rect({x, y, 11, 11}, 2, {225, 226, 232});
-    draw_glyph(key, x + 3, y + 2, 7, BLACK);
+// A key, then what it does
+void draw_hint(char letter, const char* what, int x, int y) {
+    key(letter, x, y);
     if (what) text(what, x + 15, y + 3, SOFT_TEXT, true);
 }
 
 // The keys of the image side: X up, Y down, on a dark backdrop
-void draw_arrow_hint(const Icon& key, const Icon& arrow, int y) {
+void draw_arrow_hint(char letter, const Icon& arrow, int y) {
     const int x = SCREEN_W - 28;
     round_rect({x - 3, y - 3, 28, 17}, 4, {12, 12, 22}, 170);
-    draw_hint(key, nullptr, x, y);
+    draw_hint(letter, nullptr, x, y);
     draw_glyph(arrow, x + 15, y + 4, 4, TEXT);
 }
 
@@ -476,10 +475,10 @@ void draw() {
     const int first_row = target.first_row, rows = target.rows;
 
     draw_panel_background();
-    draw_hint(KEY_A, "OK", 5, HINT_TOP_Y);
-    draw_hint(KEY_B, "Back   hold: close", 5, HINT_BOTTOM_Y);
-    draw_arrow_hint(KEY_X, ARROW_UP, HINT_TOP_Y);
-    draw_arrow_hint(KEY_Y, ARROW_DOWN, HINT_BOTTOM_Y);
+    draw_hint('A', "OK", 5, HINT_TOP_Y);
+    draw_hint('B', "Back   hold: close", 5, HINT_BOTTOM_Y);
+    draw_arrow_hint('X', ARROW_UP, HINT_TOP_Y);
+    draw_arrow_hint('Y', ARROW_DOWN, HINT_BOTTOM_Y);
 
     // Header
     if (visible({0, TITLE_Y, PANEL_W, RULE_Y + 1 - TITLE_Y})) {
@@ -596,6 +595,12 @@ void ring(float cx, float cy, float radius, float width, Color c, int alpha) {
 
 void icon(const Icon& icon, int x, int y, Color c) {
     draw_glyph(icon, x, y, 16, c);
+}
+
+void key(char letter, int x, int y) {
+    const Icon& glyph = letter == 'A' ? KEY_A : letter == 'B' ? KEY_B : letter == 'X' ? KEY_X : KEY_Y;
+    round_rect({x, y, 11, 11}, 2, {225, 226, 232});
+    draw_glyph(glyph, x + 3, y + 2, 7, BLACK);
 }
 
 void image(const uint16_t* pixels, int x, int y, int width, int height) {

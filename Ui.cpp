@@ -167,6 +167,10 @@ enum Hud : uint8_t { HUD_OFF, HUD_ON, HUD_AUTO };
 const char* const HUD_NAMES[] = {"off", "on", "auto"};
 constexpr int HUD_COUNT = sizeof(HUD_NAMES) / sizeof(HUD_NAMES[0]);
 uint8_t hud = HUD_ON;
+// Parts of the info overlay, off unless switched on
+bool depth_gauge = false;
+bool here_info = false;    // where the center is
+bool render_time = false;  // how long the view took
 
 void set_bands(int index) {
     bands = std::max(0, std::min(index, BANDS_COUNT - 1));
@@ -1058,6 +1062,24 @@ const menu::Icon ICON_FINDER = {{
     "..............#.",
     "................",
 }};
+const menu::Icon ICON_OVERLAY = {{
+    "################",
+    "#..............#",
+    "#.#####........#",
+    "#..............#",
+    "#..............#",
+    "#..............#",
+    "#..............#",
+    "#..............#",
+    "#..............#",
+    "#.####.........#",
+    "#.#######......#",
+    "#..............#",
+    "################",
+    "................",
+    "................",
+    "................",
+}};
 const menu::Icon ICON_BARS = {{
     "................",
     "............###.",
@@ -1189,9 +1211,12 @@ bool orbit_shown() {
     return inset == INSET_ORBIT && !menu::is_open();
 }
 
+// Left of the depth gauge while it's shown
+int inset_right();
+
 void draw_orbit() {
     if (!orbit_ready) return;
-    const int x = SCREEN_W - ORBIT_SIZE - 10, y = SCREEN_H - ORBIT_SIZE - 26;
+    const int x = SCREEN_W - ORBIT_SIZE - inset_right(), y = SCREEN_H - ORBIT_SIZE - 26;
     const Box box = {x - 4, y - 14, ORBIT_SIZE + 8, ORBIT_SIZE + 18};
     if (!menu::visible(box)) return;
     menu::set_clip({0, 0, SCREEN_W, SCREEN_H});
@@ -1267,6 +1292,13 @@ bool julia_shown() {
     return inset == INSET_JULIA && !menu::is_open() && julia_valid;
 }
 
+// The top of the corner inset, SCREEN_H while none is shown
+int inset_top() {
+    if (orbit_shown() && orbit_ready) return SCREEN_H - ORBIT_SIZE - 40;
+    if (julia_shown()) return SCREEN_H - JULIA_H - 40;
+    return SCREEN_H;
+}
+
 // Core0 work: the next rows. Returns false when there's nothing to do.
 bool julia_work() {
     if (inset != INSET_JULIA) return false;
@@ -1280,7 +1312,7 @@ bool julia_work() {
 }
 
 void draw_julia() {
-    const int x = SCREEN_W - JULIA_W - 10, y = SCREEN_H - JULIA_H - 26;
+    const int x = SCREEN_W - JULIA_W - inset_right(), y = SCREEN_H - JULIA_H - 26;
     const Box box = {x - 4, y - 14, JULIA_W + 8, JULIA_H + 18};
     if (!menu::visible(box)) return;
     if (julia_palette != color_palette.index()) {
@@ -1724,7 +1756,7 @@ void where_orbit() {
 
 // Core0 work, returns false when there's nothing to do
 bool where_work() {
-    if (hud == HUD_OFF) return false;
+    if (hud == HUD_OFF || !here_info) return false;
     if (state.calculation_id != where_calculation) {
         if (where_probing) finder.stop();
         namer.stop();
@@ -1829,7 +1861,11 @@ void where_text(char* out, int size) {
     out[0] = 0;
     if (!where_ready || state.calculation_id != where_calculation) return;
     int n;
-    if (where_escape && where_distance >= 1.0f)
+    if (where_escape && !std::isfinite(where_distance))
+        n = snprintf(out, size, "Here: outside, far from the set");
+    else if (where_escape && where_distance >= 1e6f)
+        n = snprintf(out, size, "Here: outside, %.1e px from the set", where_distance);
+    else if (where_escape && where_distance >= 1.0f)
         n = snprintf(out, size, "Here: outside, %.0f px from the set", where_distance);
     else if (where_escape)
         n = snprintf(out, size, "Here: on the edge, escapes at %d", where_escape);
@@ -2136,6 +2172,13 @@ void slot_row(int slot, int selected, const Box& box) {
 
 // System
 int hud_get(int) { return hud; }
+int gauge_get(int) { return depth_gauge; }
+void gauge_set(int, int v) { depth_gauge = v != 0; }
+int here_get(int) { return here_info; }
+void here_set(int, int v) { here_info = v != 0; }
+int time_get(int) { return render_time; }
+void time_set(int, int v) { render_time = v != 0; }
+bool info_enabled(int) { return hud != HUD_OFF; }
 void hud_set(int, int v) { hud = static_cast<uint8_t>(v); }
 int hud_count(int) { return HUD_COUNT; }
 const char* hud_text(int, int option, char*, int) { return names(HUD_NAMES, option); }
@@ -2364,11 +2407,23 @@ static_assert(sizeof(VIEWS_ITEMS) / sizeof(VIEWS_ITEMS[0]) == 6 + settings::VIEW
 constexpr menu::Page VIEWS_PAGE = {"Views", &ICON_BOOKMARK, VIEWS_COLOR, VIEWS_ITEMS,
                                    sizeof(VIEWS_ITEMS) / sizeof(VIEWS_ITEMS[0])};
 
-constexpr menu::Item SYSTEM_ITEMS[] = {
-    menu::choice("Info overlay", hud_get, hud_set, hud_count, hud_text,
-                 "Coordinates and zoom. Auto: 5 s after a press").live(),
+constexpr menu::Item INFO_ITEMS[] = {
+    menu::choice("Show", hud_get, hud_set, hud_count, hud_text,
+                 "Coordinates, zoom and more. Auto: 5 s after a press").live(),
+    menu::toggle("Depth gauge", gauge_get, gauge_set, "How deep the view is, down to the limit of the precision")
+        .when(info_enabled),
+    menu::toggle("Here info", here_get, here_set, "Where the center is: outside, on the edge, which bulb")
+        .when(info_enabled),
+    menu::toggle("Render time", time_get, time_set, "How long the view took, counts while it renders")
+        .when(info_enabled),
     menu::choice("Corner inset", inset_get, inset_set, inset_count, inset_text,
                  "The orbit of the center point, or the Julia set of it, in a corner"),
+};
+constexpr menu::Page INFO_PAGE = {"Info overlay", &ICON_OVERLAY, SYSTEM_COLOR, INFO_ITEMS,
+                                  sizeof(INFO_ITEMS) / sizeof(INFO_ITEMS[0])};
+
+constexpr menu::Item SYSTEM_ITEMS[] = {
+    menu::page("Info overlay", INFO_PAGE, "Coordinates, depth gauge, corner inset"),
     menu::action("Save settings now", save_settings_now, "Otherwise saved 5 min after the last press"),
     menu::page("Statistics", STATS_PAGE, "Time and work of the current view"),
     menu::action("Reset settings", factory_reset_tap, "Hold A: all settings as they came, the saved views stay")
@@ -2446,27 +2501,345 @@ void quick(int button) {
 
 // ---- Info overlay ----
 
-// The texts of the current frame. Collected once per frame, then drawn into every strip they touch. Their
-// characters share one pool, most texts are short.
-constexpr int OVERLAY_TEXT_LENGTH = 220;  // the longest one, with its 0
-struct OverlayText {
-    uint16_t text;  // in overlay_pool
-    int16_t width;  // of the widest line
-    Point position;
-    const bitmap::font_t* font;
-    int height;  // all lines and the shadow
-};
-constexpr int MAX_OVERLAY_TEXTS = 20;
-OverlayText overlay_texts[MAX_OVERLAY_TEXTS];
-int overlay_text_count = 0;
+/**
+ * Small dark glass chips like the menu's, the image stays visible around them: the keys in the corners, the
+ * coordinates at the top (long ones grow downwards), everything else stacked up from the bottom. The middle of the
+ * screen stays free. The depth gauge on the right edge shows how deep the view is, down to the limit of the precision.
+ *
+ * Laid out once per frame by render_overlay(), then drawn into every strip it touches.
+ */
+
+// The icons of the chips, 7 pixels high
+const menu::Icon SMALL_PIN = {{".###.", "#####", "##.##", "#####", ".###.", "..#..", "..#.."}};
+const menu::Icon SMALL_CROSSHAIR = {{"..###..", ".#...#.", "#..#..#", "#.###.#", "#..#..#", ".#...#.", "..###.."}};
+const menu::Icon SMALL_LENS = {{".###...", "#...#..", "#...#..", "#...#..", ".###...", "....##.", ".....##"}};
+const menu::Icon SMALL_LOOP = {{"..###.#", ".#...##", "#...###", "#......", "#.....#", ".#...#.", "..###.."}};
+const menu::Icon SMALL_MINIBROT = {
+    {"....##...", "...####..", ".#.#####.", "#########", ".#.#####.", "...####..", "....##..."}};
+const menu::Icon SMALL_PLAY = {{"#....", "##...", "###..", "####.", "###..", "##...", "#...."}};
+const menu::Icon SMALL_CLOCK = {{"..###..", ".#...#.", "#..#..#", "#..##.#", "#.....#", ".#...#.", "..###.."}};
+const menu::Icon SMALL_SPARKLE = {{"...#...", "...#...", "..###..", "#######", "..###..", "...#...", "...#..."}};
+
+int icon_width(const menu::Icon& icon) { return static_cast<int>(strlen(icon.rows[0])); }
+
+constexpr Color CHIP_COLOR = {12, 12, 22};
+constexpr int EDGE = 3;        // between the chips and the screen edges
+constexpr int CHIP_GAP = 3;
+constexpr int CHIP_LINE = 9;   // font8 and a pixel
+constexpr int HINT_H = 17;     // the chips of the keys
+constexpr int TOP_Y = EDGE + HINT_H + CHIP_GAP;                    // below the keys
+constexpr int BOTTOM_Y = SCREEN_H - EDGE - HINT_H - CHIP_GAP;      // above the keys
+constexpr int OVERLAY_TEXT_LENGTH = 220;  // the longest text, with its 0
+
+// The texts of the frame share one pool of characters
 char overlay_pool[1024];
 int overlay_pool_used = 0;
+
+// Returns where the text is in overlay_pool, -1 if it's full
+int pool_add(const char* text) {
+    const int length = static_cast<int>(strnlen(text, OVERLAY_TEXT_LENGTH - 1));
+    if (overlay_pool_used + length + 1 > static_cast<int>(sizeof(overlay_pool))) return -1;
+    const int at = overlay_pool_used;
+    memcpy(overlay_pool + at, text, length);
+    overlay_pool[at + length] = '\0';
+    overlay_pool_used += length + 1;
+    return at;
+}
+
+// Calls f(line, index) for each line of the text, returns the number of lines
+template <typename F>
+int for_lines(const char* text, F f) {
+    int i = 0;
+    for (const char* line = text; *line;) {
+        const char* end = strchr(line, '\n');
+        char buffer[OVERLAY_TEXT_LENGTH];
+        const size_t n = std::min(end ? static_cast<size_t>(end - line) : strlen(line), sizeof(buffer) - 1);
+        memcpy(buffer, line, n);
+        buffer[n] = '\0';
+        f(buffer, i++);
+        if (!end) break;
+        line = end + 1;
+    }
+    return i;
+}
+
+// Of the widest line
+int text_width(PicoGraphics& g, const char* text, bool small) {
+    g.set_font(small ? &font6 : &font8);
+    int w = 0;
+    for_lines(text, [&](const char* line, int) { w = std::max(w, static_cast<int>(g.measure_text(line, 1))); });
+    return w;
+}
+
+struct Chip {
+    Box box;
+    const menu::Icon* icon;  // nullptr: a key instead
+    Color icon_color;
+    Color text_color;
+    int16_t text;            // in overlay_pool, one or more lines
+    int16_t soft;            // in overlay_pool, after the first line in gray. -1: none.
+    int16_t soft_x;          // from the left of the box
+    char key;                // the key of a hint ('A', 'B', 'X', 'Y'), in small text
+    bool key_right;
+};
+constexpr int MAX_CHIPS = 12;
+Chip chips[MAX_CHIPS];
+int chip_count = 0;
+bool keys_tinted = false;  // A is held: the keys show the quick functions
+
+// A key and what it does, in its corner
+void add_hint(PicoGraphics& g, char key, const char* what, const char* hold, bool right, bool bottom) {
+    if (chip_count >= MAX_CHIPS) return;
+    Chip& c = chips[chip_count];
+    c.text = static_cast<int16_t>(pool_add(what));
+    c.soft = static_cast<int16_t>(hold ? pool_add(hold) : -1);
+    if (c.text < 0) return;
+    const int what_w = text_width(g, what, true);
+    const int w = 3 + 11 + 5 + what_w + (hold ? 7 + text_width(g, hold, true) : 0) + 5;
+    c.box = {right ? SCREEN_W - EDGE - w : EDGE, bottom ? SCREEN_H - EDGE - HINT_H : EDGE, w, HINT_H};
+    c.icon = nullptr;
+    c.text_color = keys_tinted ? Color{255, 255, 255} : menu::TEXT;
+    c.soft_x = static_cast<int16_t>((right ? 5 : 19) + what_w + 7);
+    c.key = key;
+    c.key_right = right;
+    chip_count++;
+}
+
+// An icon and lines of text, soft: gray after the first line. Placed by the caller. nullptr if there's no room.
+Chip* add_chip(PicoGraphics& g, const menu::Icon& icon, Color icon_color, const char* text,
+               const char* soft = nullptr, Color text_color = menu::TEXT) {
+    if (chip_count >= MAX_CHIPS || !text[0]) return nullptr;
+    Chip& c = chips[chip_count];
+    c.text = static_cast<int16_t>(pool_add(text));
+    c.soft = static_cast<int16_t>(soft ? pool_add(soft) : -1);
+    if (c.text < 0) return nullptr;
+    int first_w = 0;
+    g.set_font(&font8);
+    const int lines = for_lines(text, [&](const char* line, int i) {
+        if (i == 0) first_w = g.measure_text(line, 1);
+    });
+    const int text_x = 5 + icon_width(icon) + 5;
+    c.soft_x = static_cast<int16_t>(text_x + first_w + 6);
+    const int w = std::max(text_x + text_width(g, text, false), soft ? c.soft_x + text_width(g, soft, false) : 0) + 6;
+    c.box = {EDGE, 0, w, lines * CHIP_LINE + 5};
+    c.icon = &icon;
+    c.icon_color = icon_color;
+    c.text_color = text_color;
+    c.key = 0;
+    c.key_right = false;
+    return &chips[chip_count++];
+}
+
+// Chips in rows from the bottom up, as many in a row as fit left of right. Returns the new bottom.
+int stack_up(Chip* const* list, int n, int bottom, int right) {
+    int i = 0;
+    while (i < n) {
+        int end = i, x = EDGE, h = 0;
+        while (end < n && (end == i || x + list[end]->box.w <= right)) {
+            x += list[end]->box.w + CHIP_GAP;
+            h = std::max(h, list[end]->box.h);
+            end++;
+        }
+        x = EDGE;
+        for (int k = i; k < end; ++k) {
+            list[k]->box.x = x;
+            list[k]->box.y = bottom - list[k]->box.h;
+            x += list[k]->box.w + CHIP_GAP;
+        }
+        bottom -= h + CHIP_GAP;
+        i = end;
+    }
+    return bottom;
+}
+
+void draw_chip(const Chip& c) {
+    if (!menu::visible(c.box)) return;
+    const bool hint = c.icon == nullptr;
+    menu::round_rect(c.box, hint ? 4 : 5, CHIP_COLOR, hint ? 160 : 150);
+    if (hint && keys_tinted) menu::round_rect(c.box, 4, AUTO_ZOOM_COLOR, 70);
+    int x;
+    if (hint) {
+        menu::key(c.key, c.key_right ? c.box.x + c.box.w - 14 : c.box.x + 3, c.box.y + 3);
+        x = c.box.x + (c.key_right ? 5 : 19);
+    } else {
+        menu::icon(*c.icon, c.box.x + 5, c.box.y + 3, c.icon_color);
+        x = c.box.x + 5 + icon_width(*c.icon) + 5;
+    }
+    const int y = c.box.y + (hint ? 6 : 3);
+    for_lines(overlay_pool + c.text, [&](const char* line, int i) {
+        menu::text(line, x, y + i * CHIP_LINE, c.text_color, hint);
+    });
+    if (c.soft >= 0) menu::text(overlay_pool + c.soft, c.box.x + c.soft_x, y, menu::SOFT_TEXT, hint);
+}
+
+// Small text with a dark rim instead of a box
+void rimmed_text(const char* s, int x, int y, Color c) {
+    static const int8_t around[8][2] = {{-1, 0}, {1, 0}, {0, -1}, {0, 1}, {-1, -1}, {1, -1}, {-1, 1}, {1, 1}};
+    for (auto& o : around) menu::text(s, x + o[0], y + o[1], {0, 0, 0}, true);
+    menu::text(s, x, y, c, true);
+}
+
+void format_overlay_zoom(char* out, int size, double zoom) {
+    if (zoom < 10)
+        snprintf(out, size, "x%.2f", zoom);
+    else if (zoom < 1e4)
+        snprintf(out, size, "x%.0f", zoom);
+    else
+        format_deep_zoom(out, size, zoom);
+}
+
+// 4.2 s, 1:05, 1:02:03
+void format_duration(char* out, int size, uint32_t ms) {
+    const unsigned long s = ms / 1000;
+    if (s < 60)
+        snprintf(out, size, "%lu.%lu s", s, static_cast<unsigned long>(ms % 1000 / 100));
+    else if (s < 3600)
+        snprintf(out, size, "%lu:%02lu", s / 60, s % 60);
+    else
+        snprintf(out, size, "%lu:%02lu:%02lu", s / 3600, s / 60 % 60, s % 60);
+}
+
+// ---- Depth gauge ----
+
+/**
+ * A rail on the right edge from zoom 1 down to the limit of the precision, log scale. It fills down to the depth of
+ * the view, in the color of the math it takes there. The zoom, the math and the iteration limit sit next to the
+ * pointer. The auto zoom target and the minibrots of the glow are marked at the depth where they fill the screen.
+ */
+constexpr int GAUGE_X = SCREEN_W - 11;  // the rail, 3 wide on a dark backing 11 wide
+constexpr int GAUGE_TOP = 30, GAUGE_BOTTOM = SCREEN_H - 30;
+constexpr int GAUGE_LEFT = GAUGE_X - 32;  // its labels reach this far left
+static_assert(32 * Fixed::LIMBS == 256, "the name of the precision below");
+
+struct Gauge {
+    bool shown;
+    int y;          // of the view's depth
+    int target_y;   // -1: no target
+    int target_period;
+    Box pill;       // the zoom, the math above it, the iterations below
+    char zoom[16];
+    char iterations[16];
+    const char* math;
+    Color math_color;
+    uint8_t minibrot_y[GLOW_MAX];
+    int minibrots;
+} gauge;
+
+float decades(double zoom) { return static_cast<float>(std::log10(std::max(1.0, zoom))); }
+int gauge_y(float d) {
+    const float full = decades(PRECISION_MAX_ZOOM);
+    return GAUGE_TOP + static_cast<int>(std::clamp(d, 0.0f, full) / full * (GAUGE_BOTTOM - GAUGE_TOP) + 0.5f);
+}
+
+// What the pixels are calculated with: plain float, then float relative to a reference orbit in 256 bit fixed point,
+// deep down with an exponent of their own (see globals.h). Short, for the gauge and the iterations.
+const char* math_name(double zoom) {
+    return zoom < FLOAT_MAX_ZOOM ? "float"
+         : zoom < PERTURBATION_MIN_ZOOM ? "double"
+         : zoom < SCALED_PERTURBATION_MIN_ZOOM ? "256-bit"
+         : zoom < PRECISION_MAX_ZOOM ? "256-bit deep"
+         : "past the limit";
+}
+Color math_color(double zoom) {
+    return zoom < FLOAT_MAX_ZOOM ? RENDERING_COLOR
+         : zoom < PERTURBATION_MIN_ZOOM ? LIGHT_COLOR
+         : zoom < SCALED_PERTURBATION_MIN_ZOOM ? AUTO_ZOOM_COLOR
+         : zoom < PRECISION_MAX_ZOOM ? COLORS_COLOR
+         : VIEWS_COLOR;
+}
+
+void prepare_gauge(PicoGraphics& g) {
+    gauge.shown = true;
+    gauge.y = gauge_y(decades(state.zoom_factor));
+    gauge.math = math_name(state.zoom_factor);
+    gauge.math_color = math_color(state.zoom_factor);
+    format_overlay_zoom(gauge.zoom, sizeof(gauge.zoom), state.zoom_factor);
+    snprintf(gauge.iterations, sizeof(gauge.iterations), "%d iter", state.iteration_limit);
+    gauge.target_y = autoZoom.has_target() ? gauge_y(decades(autoZoom.target_zoom())) : -1;
+    gauge.target_period = target_period;
+    gauge.minibrots = 0;
+    for (int i = 0; i < glow_count && glow_on; ++i)
+        gauge.minibrot_y[gauge.minibrots++] = static_cast<uint8_t>(gauge_y(decades(std::abs(glow_spots[i].scale))));
+    // The three move inwards near the ends, the pointer stays at the depth
+    g.set_font(&font8);
+    const int w = g.measure_text(gauge.zoom, 1) + 10;
+    const int top = std::clamp(gauge.y - 16, TOP_Y, BOTTOM_Y - 32);
+    gauge.pill = {GAUGE_X - 11 - w, top + 9, w, 14};
+}
+
+void draw_gauge() {
+    menu::set_clip({0, 0, SCREEN_W, SCREEN_H});
+    if (!menu::visible({GAUGE_LEFT - 40, TOP_Y, SCREEN_W - GAUGE_LEFT + 40, BOTTOM_Y - TOP_Y})) return;
+    menu::round_rect({GAUGE_X - 4, GAUGE_TOP - 5, 11, GAUGE_BOTTOM - GAUGE_TOP + 10}, 5, CHIP_COLOR, 175);
+    const float full = decades(PRECISION_MAX_ZOOM);
+    // Where the math changes, like math_color()
+    const float limits[] = {decades(FLOAT_MAX_ZOOM), decades(PERTURBATION_MIN_ZOOM),
+                            decades(SCALED_PERTURBATION_MIN_ZOOM)};
+    const Color colors[] = {RENDERING_COLOR, LIGHT_COLOR, AUTO_ZOOM_COLOR, COLORS_COLOR};
+    for (int y = GAUGE_TOP; y < GAUGE_BOTTOM; ++y) {
+        const Box row = {GAUGE_X, y, 3, 1};
+        if (!menu::visible(row)) continue;
+        const float d = (y - GAUGE_TOP + 0.5f) * full / (GAUGE_BOTTOM - GAUGE_TOP);
+        int k = 0;
+        while (k < 3 && d >= limits[k]) ++k;
+        menu::blend(row, colors[k], y <= gauge.y ? 256 : 75);
+    }
+    // Every 10 powers of ten a tick, every 20 a label (not where the pointer or the target are)
+    for (int d = 10; d < full; d += 10) {
+        const int y = gauge_y(static_cast<float>(d));
+        menu::blend({GAUGE_X - 2, y, 1, 1}, {255, 255, 255}, 170);
+        menu::blend({GAUGE_X + 4, y, 1, 1}, {255, 255, 255}, 170);
+        const bool taken = (y > gauge.pill.y - 14 && y < gauge.pill.y + 26)
+                        || (gauge.target_y >= 0 && std::abs(y - gauge.target_y) < 8) || y + 6 > inset_top();
+        if (d % 20 == 0 && !taken) {
+            char label[8];
+            snprintf(label, sizeof(label), "1e%d", d);
+            rimmed_text(label, GAUGE_X - 7 - menu::text_width(label, true), y - 3, menu::SOFT_TEXT);
+        }
+    }
+    for (int i = 0; i < gauge.minibrots; ++i) menu::blend({GAUGE_X - 2, gauge.minibrot_y[i], 7, 1}, GLOW_COLOR, 220);
+    // The auto zoom target and the way there
+    if (gauge.target_y >= 0) {
+        const int from = std::min(gauge.y, gauge.target_y), to = std::max(gauge.y, gauge.target_y);
+        menu::blend({GAUGE_X, from, 3, to - from}, VIEWS_COLOR, 256);
+        menu::ring(GAUGE_X + 1.5f, gauge.target_y + 0.5f, 5.5f, 1.5f, VIEWS_COLOR);
+        if (gauge.target_period > 0) {
+            char label[12];
+            snprintf(label, sizeof(label), "p%d", gauge.target_period);
+            rimmed_text(label, GAUGE_X - 11 - menu::text_width(label, true), gauge.target_y - 2, VIEWS_COLOR);
+        }
+    }
+    // The pointer at the depth, the zoom, the math above and the iterations below
+    for (int i = 0; i < 4; ++i) menu::fill({GAUGE_X - 6 - i, gauge.y - i, 1, 2 * i + 1}, {255, 255, 255});
+    const Box& pill = gauge.pill;
+    menu::round_rect(pill, 4, CHIP_COLOR, 210);
+    menu::text(gauge.zoom, pill.x + 5, pill.y + 3, {255, 255, 255});
+    const int right = pill.x + pill.w;
+    rimmed_text(gauge.math, right - menu::text_width(gauge.math, true), pill.y - 9, gauge.math_color);
+    rimmed_text(gauge.iterations, right - menu::text_width(gauge.iterations, true), pill.y + pill.h + 3,
+                menu::SOFT_TEXT);
+}
+
+int inset_right() { return gauge.shown ? 24 : 10; }
+
+// ---- Overlay layout ----
+
+// The periods next to the glowing minibrots: plain small texts with a shadow
+struct OverlayText {
+    uint16_t text;  // in overlay_pool
+    int16_t width;
+    Point position;
+};
+constexpr int MAX_OVERLAY_TEXTS = 6;
+OverlayText overlay_texts[MAX_OVERLAY_TEXTS];
+int overlay_text_count = 0;
 
 // What the last frame showed
 struct Shown {
     bool overlay, hud, quick, toast;
     uint32_t seconds_to_step;
     bool scanning;
+    bool calculating;
 } shown;
 
 bool hud_visible(uint32_t now) {
@@ -2474,189 +2847,155 @@ bool hud_visible(uint32_t now) {
     return hud == HUD_ON || (hud == HUD_AUTO && now - last_input_ms < INFO_AUTO_HIDE_MS);
 }
 
-void add_text(PicoGraphics& g, const char* text, Point position) {
-    const int length = static_cast<int>(strnlen(text, OVERLAY_TEXT_LENGTH - 1));
-    if (overlay_text_count >= MAX_OVERLAY_TEXTS || length == 0
-            || overlay_pool_used + length + 1 > static_cast<int>(sizeof(overlay_pool)))
-        return;
-    OverlayText& t = overlay_texts[overlay_text_count++];
-    t.text = static_cast<uint16_t>(overlay_pool_used);
-    memcpy(overlay_pool + overlay_pool_used, text, length);
-    overlay_pool[overlay_pool_used + length] = '\0';
-    overlay_pool_used += length + 1;
-    t.position = position;
-    t.font = g.bitmap_font;
-    int lines = 1;
-    for (const char* c = text; *c; ++c) lines += *c == '\n';
-    t.height = lines * t.font->height + 1;
-    t.width = 0;
-    for (const char* line = overlay_pool + t.text; *line;) {
-        const char* end = strchr(line, '\n');
-        char buffer[OVERLAY_TEXT_LENGTH];
-        const size_t n = end ? static_cast<size_t>(end - line) : strlen(line);
-        memcpy(buffer, line, n);
-        buffer[n] = '\0';
-        t.width = static_cast<int16_t>(std::max<int>(t.width, g.measure_text(buffer, 1) + 1));
-        if (!end) break;
-        line = end + 1;
-    }
-}
-
 void render_overlay(PicoGraphics& g, uint32_t now) {
-    const int margin = 5;
-    g.set_font(&font6);
-    const int font_height = font6.height;
-
-    // What the buttons do: the quick functions while A is held
-    const char* text_a = "Menu / hold: Quick";
-    const char* text_b = "Left / hold: Down";
-    const char* text_x = "Right / hold: Up";
-    const char* text_y = "Zoom / hold: Out";
+    // The keys: the quick functions while A is held
+    keys_tinted = quick_shown;
     if (quick_shown) {
-        text_a = "[Quick]";
-        text_b = "> Reset view";
-        text_x = hud == HUD_OFF ? "Show info <" : "Hide info <";
-        text_y = state.auto_zoom ? "Stop auto zoom <" : "Start auto zoom <";
+        add_hint(g, 'A', "Quick", nullptr, false, false);
+        add_hint(g, 'B', "Reset view", nullptr, false, true);
+        add_hint(g, 'X', hud == HUD_OFF ? "Show info" : "Hide info", nullptr, true, false);
+        add_hint(g, 'Y', state.auto_zoom ? "Stop auto zoom" : "Start auto zoom", nullptr, true, true);
+    } else {
+        add_hint(g, 'A', "Menu", "hold: Quick", false, false);
+        add_hint(g, 'B', "Left", "hold: Down", false, true);
+        add_hint(g, 'X', "Right", "hold: Up", true, false);
+        add_hint(g, 'Y', "Zoom", "hold: Out", true, true);
     }
-    add_text(g, text_a, Point(margin, margin));
-    add_text(g, text_b, Point(margin, SCREEN_H - font_height - margin));
-    add_text(g, text_x, Point(SCREEN_W - g.measure_text(text_x, 1) - margin, margin));
-    add_text(g, text_y, Point(SCREEN_W - g.measure_text(text_y, 1) - margin, SCREEN_H - font_height - margin));
     if (!hud_visible(now)) return;
+    if (depth_gauge) prepare_gauge(g);
+    const int right = gauge.shown ? GAUGE_LEFT - CHIP_GAP : SCREEN_W - EDGE;
 
-    // Coordinates and zoom factor
-    g.set_font(&font8);
-    const int font8_height = font8.height;
-    // Enough decimals to tell neighboring pixels apart
-    double pixel_size = 4.0 / state.zoom_factor / state.screen_w;
-    int decimals = std::max(6, std::min(74, static_cast<int>(std::ceil(-std::log10(pixel_size))) + 1));
-    int line_length = (SCREEN_W - 2 * margin) / g.measure_text("0", 1);
-    char real_text[100];
-    char imag_text[100];
-    format_coordinate(state.center.real, decimals, line_length, real_text, sizeof(real_text));
-    format_coordinate(state.center.imag, decimals, line_length, imag_text, sizeof(imag_text));
-
-    char coord_text[OVERLAY_TEXT_LENGTH];
-    snprintf(coord_text, sizeof(coord_text), "Coordinates:\n%s\n%s", real_text, imag_text);
-    int coord_lines = 1;
-    for (const char* c = coord_text; *c; ++c) coord_lines += *c == '\n';
-
-    char zoom_text[30];
-    if (state.zoom_factor < 1e3)
-        snprintf(zoom_text, sizeof(zoom_text), "Zoom: x%.2f", state.zoom_factor);
-    else
-        snprintf(zoom_text, sizeof(zoom_text), "Zoom: x%.1e", state.zoom_factor);
-
-    int info_y = margin * 3 + font8_height;
-    char where[OVERLAY_TEXT_LENGTH];
-    where_text(where, sizeof(where));
-    if (where[0]) {
-        add_text(g, where, Point(margin, info_y));
-        info_y += font8_height + margin;
-        for (const char* c = where; *c; ++c) info_y += *c == '\n' ? font8_height : 0;
+    // Top: the coordinates, with enough decimals to tell neighboring pixels apart. Long ones wrap downwards.
+    {
+        const double pixel_size = 4.0 / state.zoom_factor / state.screen_w;
+        const int decimals = std::max(6, std::min(74, static_cast<int>(std::ceil(-std::log10(pixel_size))) + 1));
+        g.set_font(&font8);
+        const int line_length = (right - EDGE - 10 - icon_width(SMALL_CROSSHAIR) - 6) / g.measure_text("0", 1);
+        char real_text[100], imag_text[100], text[OVERLAY_TEXT_LENGTH];
+        format_coordinate(state.center.real, decimals, line_length, real_text, sizeof(real_text));
+        format_coordinate(state.center.imag, decimals, line_length, imag_text, sizeof(imag_text));
+        snprintf(text, sizeof(text), "%s\n%s", real_text, imag_text);
+        if (Chip* c = add_chip(g, SMALL_CROSSHAIR, STYLE_COLOR, text, nullptr, {255, 255, 255})) c->box.y = TOP_Y;
     }
 
-    add_text(g, coord_text, Point(margin, info_y));
-    info_y += font8_height * coord_lines + margin;
-    add_text(g, zoom_text, Point(margin, info_y));
-
-    info_y += font8_height + margin;
-    char iterations_text[48];
-    snprintf(iterations_text, sizeof(iterations_text), "Iterations: %d (%s)", state.iteration_limit,
-             precision_name());
-    add_text(g, iterations_text, Point(margin, info_y));
-
-    if (autoZoom.has_target()) {
-        info_y += font8_height + margin;
-        char zoom_text[16], target_text[48];
-        format_deep_zoom(zoom_text, sizeof(zoom_text), autoZoom.target_zoom());
-        if (target_period > 0)
-            snprintf(target_text, sizeof(target_text), "Minibrot at %s, period %d", zoom_text, target_period);
-        else
-            snprintf(target_text, sizeof(target_text), "Auto zoom target: %s", zoom_text);
-        add_text(g, target_text, Point(margin, info_y));
+    // Bottom, stacked upwards: zoom and iterations (in the gauge if it's on), where the center is, then what runs
+    int bottom = BOTTOM_Y;
+    Chip* row[3];
+    int n = 0;
+    if (!gauge.shown) {
+        char zoom[16], iterations[16], math[32];
+        format_overlay_zoom(zoom, sizeof(zoom), state.zoom_factor);
+        snprintf(iterations, sizeof(iterations), "%d", state.iteration_limit);
+        snprintf(math, sizeof(math), "iter, %s", math_name(state.zoom_factor));
+        if (Chip* c = add_chip(g, SMALL_LENS, AUTO_ZOOM_COLOR, zoom, nullptr, {255, 255, 255})) row[n++] = c;
+        if (Chip* c = add_chip(g, SMALL_LOOP, RENDERING_COLOR, iterations, math)) row[n++] = c;
     }
+    // How long the view took, counting while it renders (the frames come regularly then)
+    if (render_time) {
+        char time[16];
+        format_duration(time, sizeof(time), fractalis.view_stats().ms);
+        if (Chip* c = add_chip(g, SMALL_CLOCK, LIGHT_COLOR, time, state.calculating ? "rendering" : "to render"))
+            row[n++] = c;
+    }
+    bottom = stack_up(row, n, bottom, right);
 
+    char where[OVERLAY_TEXT_LENGTH] = "";
+    if (here_info) where_text(where, sizeof(where));
+    char* here = strncmp(where, "Here: ", 6) == 0 ? where + 6 : where;
+    here[0] = static_cast<char>(toupper(here[0]));
+    if (Chip* c = add_chip(g, SMALL_PIN, VIEWS_COLOR, here)) bottom = stack_up(&c, 1, bottom, right);
+
+    n = 0;
     if (state.auto_zoom) {
-        info_y += font8_height + margin;
-        char auto_zoom_text[40];
-        uint32_t seconds = autoZoom.seconds_to_next_step(now);
-        if (seconds > 1) {
-            snprintf(auto_zoom_text, sizeof(auto_zoom_text), "Auto Zoom: ON, next step in %lu:%02lu",
-                     static_cast<unsigned long>(seconds / 60), static_cast<unsigned long>(seconds % 60));
-        } else {
-            snprintf(auto_zoom_text, sizeof(auto_zoom_text), "Auto Zoom: ON");
-        }
-        add_text(g, auto_zoom_text, Point(margin, info_y));
+        char next[24] = "";
+        const uint32_t seconds = autoZoom.seconds_to_next_step(now);
+        if (seconds > 1)
+            snprintf(next, sizeof(next), "next step %lu:%02lu", static_cast<unsigned long>(seconds / 60),
+                     static_cast<unsigned long>(seconds % 60));
+        if (Chip* c = add_chip(g, SMALL_PLAY, AUTO_ZOOM_COLOR, "Auto zoom", next[0] ? next : nullptr)) row[n++] = c;
     }
-
+    if (autoZoom.has_target()) {
+        char zoom[16], text[24], at[24];
+        format_deep_zoom(zoom, sizeof(zoom), autoZoom.target_zoom());
+        if (target_period > 0)
+            snprintf(text, sizeof(text), "Minibrot p%d", target_period);
+        else
+            snprintf(text, sizeof(text), "Target");
+        snprintf(at, sizeof(at), "at %s", zoom);
+        if (Chip* c = add_chip(g, SMALL_MINIBROT, VIEWS_COLOR, text, at)) row[n++] = c;
+    }
     // The glow scan: redrawn with every minibrot it finds
     if (glow_scanning() || (glow_on && glow_count > 0)) {
-        info_y += font8_height + margin;
-        char glow_text[60];
-        if (glow_scanning()) {
-            snprintf(glow_text, sizeof(glow_text), "Finding minibrots... %d", glow_count);
+        char text[24], detail[40];
+        snprintf(text, sizeof(text), "%d minibrots", glow_count);
+        if (glow_scanning() || glow_count == 0) {
+            snprintf(detail, sizeof(detail), "finding...");
         } else {
             char zoom[16];
             format_deep_zoom(zoom, sizeof(zoom), std::abs(glow_spots[0].scale));
-            snprintf(glow_text, sizeof(glow_text), "Minibrots: %d, biggest p%d at %s", glow_count,
-                     glow_spots[0].period, zoom);
+            snprintf(detail, sizeof(detail), "biggest p%d at %s", glow_spots[0].period, zoom);
         }
-        add_text(g, glow_text, Point(margin, info_y));
+        if (Chip* c = add_chip(g, SMALL_SPARKLE, GLOW_COLOR, text, detail)) row[n++] = c;
     }
+    stack_up(row, n, bottom, right);
 }
 
-// The period next to the biggest glowing minibrots, right of the glow (left at the right edge)
+// Nothing of the overlay there
+bool overlay_free(int x, int y, int w, int h) {
+    auto apart = [&](const Box& b) { return x + w < b.x || x > b.x + b.w || y + h < b.y || y > b.y + b.h; };
+    for (int i = 0; i < chip_count; ++i)
+        if (!apart(chips[i].box)) return false;
+    for (int i = 0; i < overlay_text_count; ++i) {
+        const OverlayText& t = overlay_texts[i];
+        if (!apart({t.position.x, t.position.y, t.width, font6.height + 1})) return false;
+    }
+    if (gauge.shown) {
+        const Box& p = gauge.pill;
+        if (!apart({GAUGE_LEFT, GAUGE_TOP - 5, SCREEN_W - GAUGE_LEFT, GAUGE_BOTTOM - GAUGE_TOP + 10})
+                || !apart({p.x, p.y - 10, p.w, p.h + 20}))
+            return false;
+    }
+    return true;
+}
+
+// The period next to the biggest glowing minibrots, right of the glow (left near the right edge)
 void add_glow_labels(PicoGraphics& g) {
     constexpr int LABELS = 5;
     g.set_font(&font6);
-    for (int i = 0; i < glow_count && i < LABELS; ++i) {
+    const int right = gauge.shown ? GAUGE_LEFT : SCREEN_W;
+    for (int i = 0; i < glow_count && i < LABELS && overlay_text_count < MAX_OVERLAY_TEXTS; ++i) {
         const GlowSpot& s = glow_spots[i];
         char label[8];
         snprintf(label, sizeof(label), "p%d", s.period);
         const int width = g.measure_text(label, 1);
         const float radius = glow_radius(s) * 0.6f;
         int x = static_cast<int>(s.x + radius);
-        if (x + width >= SCREEN_W) x = static_cast<int>(s.x - radius) - width;
+        if (x + width >= right) x = static_cast<int>(s.x - radius) - width;
         const int y = static_cast<int>(s.y) - font6.height / 2;
-        // Not over the info texts (or another label)
-        bool free = true;
-        for (int k = 0; k < overlay_text_count && free; ++k) {
-            const OverlayText& t = overlay_texts[k];
-            free = x + width < t.position.x || x > t.position.x + t.width || y + font6.height < t.position.y
-                || y > t.position.y + t.height;
-        }
-        if (free) add_text(g, label, Point(x, y));
+        if (!overlay_free(x, y, width, font6.height)) continue;
+        const int text = pool_add(label);
+        if (text < 0) return;
+        overlay_texts[overlay_text_count++] = {static_cast<uint16_t>(text), static_cast<int16_t>(width), Point(x, y)};
     }
 }
 
 void draw_overlay_texts(PicoGraphics& g, int first_row, int rows) {
     g.clip = Rect(0, first_row, SCREEN_W, rows);
+    g.set_font(&font6);
     for (int i = 0; i < overlay_text_count; ++i) {
         const OverlayText& t = overlay_texts[i];
-        if (t.position.y >= first_row + rows || t.position.y + t.height <= first_row) continue;
-        // White text with a dark shadow, so it is readable on bright colors as well
-        g.set_font(t.font);
-        // Only the lines in this strip: drawing a text goes through all of its pixels, also the clipped ones
-        const int line_height = t.font->height;
-        int line_y = t.position.y;
-        for (const char* line = overlay_pool + t.text; *line;) {
-            const char* end = strchr(line, '\n');
-            size_t length = end ? static_cast<size_t>(end - line) : strlen(line);
-            if (line_y < first_row + rows && line_y + line_height + 1 > first_row) {
-                char buffer[OVERLAY_TEXT_LENGTH];
-                memcpy(buffer, line, length);
-                buffer[length] = '\0';
-                g.set_pen(0, 0, 0);
-                g.text(buffer, Point(t.position.x + 1, line_y + 1), SCREEN_W, 1);
-                g.set_pen(255, 255, 255);
-                g.text(buffer, Point(t.position.x, line_y), SCREEN_W, 1);
-            }
-            line_y += line_height;
-            if (!end) break;
-            line = end + 1;
-        }
+        if (t.position.y >= first_row + rows || t.position.y + font6.height + 1 <= first_row) continue;
+        // White with a dark shadow, readable on bright colors as well
+        g.set_pen(0, 0, 0);
+        g.text(overlay_pool + t.text, Point(t.position.x + 1, t.position.y + 1), SCREEN_W, 1);
+        g.set_pen(255, 255, 255);
+        g.text(overlay_pool + t.text, t.position, SCREEN_W, 1);
     }
+}
+
+void draw_chips() {
+    menu::set_clip({0, 0, SCREEN_W, SCREEN_H});
+    for (int i = 0; i < chip_count; ++i) draw_chip(chips[i]);
 }
 
 // A short message at the bottom of the image
@@ -2803,7 +3142,8 @@ bool update(uint32_t now, uint32_t elapsed_ms) {
     if (shown.overlay != overlay_wanted() || shown.hud != hud_visible(now) || shown.quick != quick_shown
             || shown.toast != toast_active(now)
             || (shown.hud && state.auto_zoom && shown.seconds_to_step != autoZoom.seconds_to_next_step(now))
-            || (shown.hud && shown.scanning != glow_scanning())) {
+            || (shown.hud && shown.scanning != glow_scanning())
+            || (shown.hud && render_time && shown.calculating != (state.calculating != 0))) {
         state.needs_redraw = true;
     }
 
@@ -2895,8 +3235,10 @@ void prepare_frame(PicoGraphics& g) {
     const uint32_t now = now_ms();
     overlay_text_count = 0;
     overlay_pool_used = 0;
+    chip_count = 0;
+    gauge.shown = false;
     shown = {overlay_wanted(), hud_visible(now), quick_shown, toast_active(now),
-             autoZoom.seconds_to_next_step(now), glow_scanning()};
+             autoZoom.seconds_to_next_step(now), glow_scanning(), state.calculating != 0};
     if (orbit_shown() && (!orbit_ready || memcmp(&orbit_center, &state.center, sizeof(Coordinate)) != 0)) {
         calculate_orbit();
     }
@@ -2914,6 +3256,8 @@ void draw_strip(PicoGraphics& g, uint16_t* strip, int first_row, int rows) {
     draw_overlay_texts(g, first_row, rows);
     menu::begin_strip(g, strip, first_row, rows);
     if (glow_shown()) draw_glow();
+    draw_chips();
+    if (gauge.shown) draw_gauge();
     menu::draw();
     if (orbit_shown()) draw_orbit();
     if (julia_shown()) draw_julia();
@@ -2946,6 +3290,9 @@ Settings current_settings() {
     memcpy(s.slots, legacy_slots, sizeof(s.slots));
     s.extra_look = extra_look();
     s.edge_glow = color_palette.edges;
+    s.gauge_shown = depth_gauge;
+    s.here_shown = here_info;
+    s.time_shown = render_time;
     return s;
 }
 
@@ -2956,6 +3303,9 @@ void apply_settings(const Settings& s) {
     apply_extra_look(s.extra_look, true);
     color_palette.select(s.palette);
     color_palette.edges = s.edge_glow;
+    depth_gauge = s.gauge_shown != 0;
+    here_info = s.here_shown != 0;
+    render_time = s.time_shown != 0;
     color_palette.shading = s.shading;
     fractalis.set_supersampling(s.supersampling);
     color_cycle = s.color_cycle < 3 ? static_cast<ColorCycle>(s.color_cycle) : ColorCycle::ALWAYS;
