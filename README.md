@@ -47,8 +47,13 @@ Holding B while powering on starts with the default settings.
 **Views**
 - 10 saved views with a small picture, famous places and deep zoom tests, the way back to the views before.
 - All settings and the view survive a restart.
-- Plugged into a computer the Pico shows up as a USB drive with the views as text and a picture of the screen.
-  Edit a line to go there or to store it in a slot, the drive's README.TXT explains how.
+
+**USB drive**
+- Plugged into a computer, the Pico shows up as a small USB drive: VIEWS.TXT with the current view and the 10 saved
+  views, SCREEN.BMP with the picture on the screen.
+- Edit a line of VIEWS.TXT (or copy a text file with such lines onto the drive) to go to a view or to store it in a
+  slot, the drive's README.TXT explains how. Views > Update USB drive brings the files up to date.
+- Flashing works over the same cable, no BOOTSEL button needed.
 
 ## Build and flash
 
