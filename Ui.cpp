@@ -435,28 +435,30 @@ bool slot_view(int slot, settings::View& out) {
     return false;
 }
 
-// The image at 1/5 of its size, each pixel the average of 5 x 5
+// The image scaled down, each pixel the average of the screen pixels it covers (5 x 5 on the 2.8", 3 or 4 on a side
+// on the 1.14")
 void draw_thumbnail(int first_row, int rows, uint16_t* out) {
-    constexpr int SCALE = SCREEN_W / settings::THUMBNAIL_W;
-    static_assert(SCALE * settings::THUMBNAIL_W == SCREEN_W && SCALE * settings::THUMBNAIL_H == SCREEN_H,
-                  "the thumbnail must be the screen scaled down");
+    constexpr int TW = settings::THUMBNAIL_W, TH = settings::THUMBNAIL_H;
+    static_assert(SCREEN_W * TH == SCREEN_H * TW, "the thumbnail must be the screen scaled down");
     static uint16_t row[SCREEN_W];
-    static uint16_t sums[settings::THUMBNAIL_W][3];
+    static uint16_t sums[TW][3];
     for (int ty = first_row; ty < first_row + rows; ++ty) {
         memset(sums, 0, sizeof(sums));
-        for (int dy = 0; dy < SCALE; ++dy) {
-            color_palette.render_rows(state.pixelState, state.screen_w, state.screen_h, ty * SCALE + dy, 1, row,
+        const int y0 = ty * SCREEN_H / TH, y1 = (ty + 1) * SCREEN_H / TH;
+        for (int y = y0; y < y1; ++y) {
+            color_palette.render_rows(state.pixelState, state.screen_w, state.screen_h, y, 1, row,
                                       &state.content, state.zoom_preview);
             for (int x = 0; x < SCREEN_W; ++x) {
                 uint16_t v = static_cast<uint16_t>((row[x] >> 8) | (row[x] << 8));
-                uint16_t* sum = sums[x / SCALE];
+                uint16_t* sum = sums[x * TW / SCREEN_W];
                 sum[0] += v >> 11;
                 sum[1] += (v >> 5) & 63;
                 sum[2] += v & 31;
             }
         }
-        for (int tx = 0; tx < settings::THUMBNAIL_W; ++tx) {
-            constexpr int N = SCALE * SCALE;
+        for (int tx = 0; tx < TW; ++tx) {
+            // The columns x with x * TW / SCREEN_W == tx
+            const int N = (y1 - y0) * (((tx + 1) * SCREEN_W + TW - 1) / TW - (tx * SCREEN_W + TW - 1) / TW);
             uint16_t v = static_cast<uint16_t>(((sums[tx][0] + N / 2) / N << 11) | ((sums[tx][1] + N / 2) / N << 5)
                                                | (sums[tx][2] + N / 2) / N);
             out[(ty - first_row) * settings::THUMBNAIL_W + tx] = static_cast<uint16_t>((v >> 8) | (v << 8));
@@ -1111,7 +1113,7 @@ const menu::Icon ICON_BARS = {{
  * Calculated in fixed point once per view, so it is right at any depth, and drawn into an alpha mask: anti-aliased
  * lines between the points, the points brighter, both fading along the orbit.
  */
-constexpr int ORBIT_SIZE = 80;              // pixels, square
+constexpr int ORBIT_SIZE = SMALL_DISPLAY ? 56 : 80;  // pixels, square
 constexpr float ORBIT_RANGE = 2.3f;         // |re|, |im| up to this fit in
 constexpr int ORBIT_ITERATIONS = 500;       // drawn
 // Iterated further, up to the view's iteration limit, to find out if it escapes or where it settles
@@ -1122,7 +1124,7 @@ enum Inset { INSET_OFF, INSET_ORBIT, INSET_JULIA, INSET_COUNT };
 const char* const INSET_NAMES[] = {"off", "orbit", "Julia"};
 static_assert(sizeof(INSET_NAMES) / sizeof(INSET_NAMES[0]) == INSET_COUNT, "a name for every inset");
 int inset = INSET_OFF;
-constexpr int JULIA_W = 80, JULIA_H = 60;
+constexpr int JULIA_W = SMALL_DISPLAY ? 60 : 80, JULIA_H = SMALL_DISPLAY ? 44 : 60;
 uint8_t inset_buffer[JULIA_W * JULIA_H];
 static_assert(sizeof(inset_buffer) >= ORBIT_SIZE * ORBIT_SIZE / 2, "room for the orbit");
 uint8_t* const orbit_mask = inset_buffer;  // 4 bits per pixel, see menu::mask()
@@ -1232,13 +1234,14 @@ void draw_orbit() {
     menu::blend({static_cast<int>(cx), y, 1, ORBIT_SIZE}, {200, 200, 220}, 50);
     menu::ring(cx, cy, 2.0f / ORBIT_RANGE * 0.5f * ORBIT_SIZE, 1.0f, {200, 200, 220}, 110);
     menu::mask(x, y, ORBIT_SIZE, ORBIT_SIZE, orbit_mask, {255, 225, 120});
+    // Shorter on the small screen, the inset is narrower
     char text[24];
     if (orbit_escape)
-        snprintf(text, sizeof(text), "escapes at %d", orbit_escape);
+        snprintf(text, sizeof(text), SMALL_DISPLAY ? "out at %d" : "escapes at %d", orbit_escape);
     else if (orbit_cycle)
         snprintf(text, sizeof(text), "cycle of %d", orbit_cycle);
     else
-        snprintf(text, sizeof(text), "no escape in %d", orbit_limit);
+        snprintf(text, sizeof(text), SMALL_DISPLAY ? "in for %d" : "no escape in %d", orbit_limit);
     menu::text(text, x, box.y + 4, {225, 226, 235}, true);
 }
 
@@ -1304,6 +1307,13 @@ int inset_top() {
     return SCREEN_H;
 }
 
+// The left edge of the corner inset, SCREEN_W while none is shown
+int inset_left() {
+    if (orbit_shown() && orbit_ready) return SCREEN_W - ORBIT_SIZE - inset_right() - 4;
+    if (julia_shown()) return SCREEN_W - JULIA_W - inset_right() - 4;
+    return SCREEN_W;
+}
+
 // Core0 work: the next rows. Returns false when there's nothing to do.
 bool julia_work() {
     if (inset != INSET_JULIA) return false;
@@ -1359,9 +1369,10 @@ const char* inset_text(int, int option, char*, int) { return INSET_NAMES[option]
  * Each one glows as soon as it is found. After a pan or zoom the ones of the view before move along and glow until
  * the scan of the new view is done, those it doesn't find again go then.
  */
-constexpr int GLOW_CELL = 20;                       // pixels, square
+constexpr int GLOW_CELL = SMALL_DISPLAY ? 15 : 20;  // pixels, square
 constexpr int GLOW_COLUMNS = SCREEN_W / GLOW_CELL;  // 16
-constexpr int GLOW_ROWS = SCREEN_H / GLOW_CELL;     // 12
+constexpr int GLOW_ROWS = SCREEN_H / GLOW_CELL;     // 12 (9 on the 1.14")
+static_assert(GLOW_COLUMNS * GLOW_CELL == SCREEN_W && GLOW_ROWS * GLOW_CELL == SCREEN_H, "cells cover the screen");
 constexpr int GLOW_MAX = 64;                        // the biggest ones
 constexpr float GLOW_VISIBLE_PX = 32.0f;            // bigger minibrots are easy to see, they don't glow
 constexpr Color GLOW_COLOR = {170, 235, 255};
@@ -2162,21 +2173,23 @@ void slot_row(int slot, int selected, const Box& box) {
         if (used) menu::text("?", x + W / 2 - 2, y + H / 2 - 4, menu::SOFT_TEXT);
     }
     const int tx = x + W + 9;
+    // Three lines next to the picture
+    constexpr int TOP = SMALL_DISPLAY ? 4 : 9, LINE = SMALL_DISPLAY ? 11 : 13;
     char text[32];
     snprintf(text, sizeof(text), "Slot %d", slot + 1);
-    menu::text(text, tx, box.y + 9, selected ? Color{255, 255, 255} : menu::TEXT);
+    menu::text(text, tx, box.y + TOP, selected ? Color{255, 255, 255} : menu::TEXT);
     if (used) {
         format_zoom(text, sizeof(text), v.zoom);
-        menu::text(text, tx, box.y + 22, menu::SOFT_TEXT);
+        menu::text(text, tx, box.y + TOP + LINE, menu::SOFT_TEXT);
         if (v.has_look) {
             const int trap = v.orbit_trap & 15;
             snprintf(text, sizeof(text), "%s%s%s%s", palette::name(v.palette), trap ? ", " : "",
                      trap ? TRAP_NAMES[trap % Fractalis::TRAP_COUNT] : "",
                      look_distance(v.extra_look) ? ", distance" : "");
-            menu::text(text, tx, box.y + 35, menu::SOFT_TEXT);
+            menu::text(text, tx, box.y + TOP + 2 * LINE, menu::SOFT_TEXT);
         }
     } else {
-        menu::text("empty", tx, box.y + 22, menu::SOFT_TEXT);
+        menu::text("empty", tx, box.y + TOP + LINE, menu::SOFT_TEXT);
     }
 }
 
@@ -2642,21 +2655,41 @@ Chip* add_chip(PicoGraphics& g, const menu::Icon& icon, Color icon_color, const 
     return &chips[chip_count++];
 }
 
-// Chips in rows from the bottom up, as many in a row as fit left of right. Returns the new bottom.
+// The chips stacked from the bottom stay below this (the coordinates at the top end above it)
+int stack_top = 0;
+
+// Chips in rows from the bottom up, as many in a row as fit left of right. Returns the new bottom. A row too wide to
+// pass the corner inset goes above it. A row that would reach above stack_top isn't shown (on the small screen, with
+// many chips).
 int stack_up(Chip* const* list, int n, int bottom, int right) {
     int i = 0;
     while (i < n) {
+        // Beside the inset only what fits left of it, a chip wider than that goes above it
+        int limit = right;
+        if (bottom > inset_top() - CHIP_GAP) {
+            limit = std::min(right, inset_left() - CHIP_GAP);
+            if (EDGE + list[i]->box.w > limit) {
+                bottom = inset_top() - CHIP_GAP;
+                limit = right;
+            }
+        }
         int end = i, x = EDGE, h = 0;
-        while (end < n && (end == i || x + list[end]->box.w <= right)) {
+        while (end < n && (end == i || x + list[end]->box.w <= limit)) {
             x += list[end]->box.w + CHIP_GAP;
             h = std::max(h, list[end]->box.h);
             end++;
         }
         x = EDGE;
+        const bool fits = bottom - h >= stack_top;
         for (int k = i; k < end; ++k) {
             list[k]->box.x = x;
             list[k]->box.y = bottom - list[k]->box.h;
+            if (!fits) list[k]->box = {-1000, -1000, 0, 0};
             x += list[k]->box.w + CHIP_GAP;
+        }
+        if (!fits) {
+            i = end;
+            continue;
         }
         bottom -= h + CHIP_GAP;
         i = end;
@@ -2725,6 +2758,9 @@ static_assert(32 * Fixed::LIMBS == 256, "the name of the precision below");
 
 struct Gauge {
     bool shown;
+    // The zoom, math and iterations next to the pointer. Not on the small screen while the corner inset is shown,
+    // they don't fit above it: they are in the chips at the bottom then.
+    bool labels;
     int y;          // of the view's depth
     int target_y;   // -1: no target
     int target_period;
@@ -2762,6 +2798,7 @@ Color math_color(double zoom) {
 
 void prepare_gauge(PicoGraphics& g) {
     gauge.shown = true;
+    gauge.labels = !SMALL_DISPLAY || inset_top() >= SCREEN_H;
     gauge.y = gauge_y(decades(state.zoom_factor));
     gauge.math = math_name(state.zoom_factor);
     gauge.math_color = math_color(state.zoom_factor);
@@ -2772,11 +2809,11 @@ void prepare_gauge(PicoGraphics& g) {
     gauge.minibrots = 0;
     for (int i = 0; i < glow_count && glow_on; ++i)
         gauge.minibrot_y[gauge.minibrots++] = static_cast<uint8_t>(gauge_y(decades(std::abs(glow_spots[i].scale))));
-    // The three move inwards near the ends, the pointer stays at the depth
+    // The three move inwards near the ends (and stay above the corner inset), the pointer stays at the depth
     g.set_font(&font8);
     const int w = g.measure_text(gauge.zoom, 1) + 10;
-    const int top = std::clamp(gauge.y - 16, TOP_Y, BOTTOM_Y - 32);
-    gauge.pill = {GAUGE_X - 11 - w, top + 9, w, 14};
+    const int top = std::max(TOP_Y, std::min(gauge.y - 16, std::min(BOTTOM_Y, inset_top()) - 32));
+    gauge.pill = gauge.labels ? Box{GAUGE_X - 11 - w, top + 9, w, 14} : Box{-1000, -1000, 0, 0};
 }
 
 void draw_gauge() {
@@ -2823,6 +2860,7 @@ void draw_gauge() {
     }
     // The pointer at the depth, the zoom, the math above and the iterations below
     for (int i = 0; i < 4; ++i) menu::fill({GAUGE_X - 6 - i, gauge.y - i, 1, 2 * i + 1}, {255, 255, 255});
+    if (!gauge.labels) return;
     const Box& pill = gauge.pill;
     menu::round_rect(pill, 4, CHIP_COLOR, 210);
     menu::text(gauge.zoom, pill.x + 5, pill.y + 3, {255, 255, 255});
@@ -2887,14 +2925,18 @@ void render_overlay(PicoGraphics& g, uint32_t now) {
         format_coordinate(state.center.real, decimals, line_length, real_text, sizeof(real_text));
         format_coordinate(state.center.imag, decimals, line_length, imag_text, sizeof(imag_text));
         snprintf(text, sizeof(text), "%s\n%s", real_text, imag_text);
-        if (Chip* c = add_chip(g, SMALL_CROSSHAIR, STYLE_COLOR, text, nullptr, {255, 255, 255})) c->box.y = TOP_Y;
+        stack_top = TOP_Y;
+        if (Chip* c = add_chip(g, SMALL_CROSSHAIR, STYLE_COLOR, text, nullptr, {255, 255, 255})) {
+            c->box.y = TOP_Y;
+            stack_top = TOP_Y + c->box.h + CHIP_GAP;
+        }
     }
 
     // Bottom, stacked upwards: zoom and iterations (in the gauge if it's on), where the center is, then what runs
     int bottom = BOTTOM_Y;
     Chip* row[3];
     int n = 0;
-    if (!gauge.shown) {
+    if (!gauge.shown || !gauge.labels) {
         char zoom[16], iterations[16], math[32];
         format_overlay_zoom(zoom, sizeof(zoom), state.zoom_factor);
         snprintf(iterations, sizeof(iterations), "%d", state.iteration_limit);
@@ -3012,9 +3054,10 @@ void draw_chips() {
 
 // A short message at the bottom of the image
 void draw_toast() {
-    const int left = menu::is_open() ? menu::PANEL_W : 0;
     const int w = menu::text_width(toast_text) + 20;
-    const Box box = {(left + SCREEN_W - w) / 2, SCREEN_H - 44, w, 21};
+    // Right of the menu if it fits there, over it otherwise
+    const int left = menu::is_open() && w <= SCREEN_W - menu::PANEL_W ? menu::PANEL_W : 0;
+    const Box box = {std::max(0, (left + SCREEN_W - w) / 2), SCREEN_H - 44, w, 21};
     if (!menu::visible(box)) return;
     menu::round_rect(box, 7, {14, 14, 26}, 215);
     menu::text(toast_text, box.x + 10, box.y + 7, {240, 241, 246});

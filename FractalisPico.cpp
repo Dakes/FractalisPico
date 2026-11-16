@@ -28,9 +28,9 @@
 
 using namespace pimoroni;
 
-// Set to the width and height of your pimoroni display
-const uint16_t width = 320;
-const uint16_t height = 240;
+// The display, see SMALL_DISPLAY in globals.h
+const uint16_t width = SCREEN_WIDTH;
+const uint16_t height = SCREEN_HEIGHT;
 
 ST7789 st7789(width, height, ROTATE_0, false, get_spi_pins(BG_SPI_FRONT));
 // RGB565 for smooth color gradients (RGB332 only has 256 colors), drawn in strips instead of a full frame buffer

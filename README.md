@@ -1,7 +1,7 @@
 # FractalisPico
 
-A Mandelbrot explorer for the Raspberry Pi Pico 2 (RP2350) with a Pimoroni Pico Display Pack 2.8" (320 x 240, four
-buttons, RGB LED).
+A Mandelbrot explorer for the Raspberry Pi Pico 2 (RP2350) with a Pimoroni Pico Display Pack 2.8" (320 x 240) or 1.14"
+(240 x 135), each with four buttons and an RGB LED.
 
 ## Controls
 
@@ -59,15 +59,19 @@ Holding B while powering on starts with the default settings.
 
 ```
 nix develop
-./flash_pico.sh            # build and flash
-./flash_pico.sh --debug    # with the log on the USB serial port: tio /dev/ttyACM0
+./flash_pico.sh            # build and flash, Display Pack 2.8"
+./flash_pico.sh --small    # Display Pack 1.14" (built in build_small)
+./flash_pico.sh --debug    # with the log on the USB serial port: tio /dev/ttyACM0 (combines with --small)
 ```
 
 Without nix: clone with `--recursive` (the Pico SDK and pimoroni-pico are submodules), then
-`cmake -B build -G Ninja && ninja -C build` builds `build/FractalisPico.uf2`.
+`cmake -B build -G Ninja && ninja -C build` builds `build/FractalisPico.uf2`, add `-DFRACTALIS_SMALL_DISPLAY=ON` for
+the 1.14".
+
+On the 1.14" the menu shows four rows at a time, and while a corner inset is shown, the depth gauge leaves its labels
+to the chips at the bottom. Saved views are kept per display: a build for the other one starts with empty slots.
 
 ## TODO
 
-- Support the smaller Display Pack 1.14" (240 x 135) again: layout of the menu and the overlay, LED pins.
 - Run on the Pico 1 (RP2040) as well, e.g. with the 1.14" pack. It has less RAM (264 KB instead of 520 KB) and no
   single precision FPU, so some features would have to go or shrink (pixel state, reference orbit, USB drive).

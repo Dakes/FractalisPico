@@ -139,6 +139,13 @@ if (FRACTALIS_DEBUG)
     target_compile_definitions(${NAME} PRIVATE DEBUG=1)
 endif()
 
+# The display: off the Display Pack 2.8" (320 x 240), on the Display Pack 1.14" (240 x 135), see SMALL_DISPLAY in
+# globals.h
+option(FRACTALIS_SMALL_DISPLAY "Build for the Pimoroni Display Pack 1.14\" instead of the 2.8\"" OFF)
+if (FRACTALIS_SMALL_DISPLAY)
+    target_compile_definitions(${NAME} PRIVATE SMALL_DISPLAY=1)
+endif()
+
 # Enable floating-point support in printf functions
 target_link_options(${PROJECT_NAME} PRIVATE -Wl,-u,_printf_float)
 

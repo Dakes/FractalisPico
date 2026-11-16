@@ -20,10 +20,25 @@
 #define ANIMATION_INTERVAL_CALCULATING_MS 100
 #define CORE0_WORK_MS 20         // How long core0 helps calculating before it checks input again
 
-// RGB LED pins. Display Pack 2.8": 26, 27, 28. Display Pack 1.14" and 2.0": 6, 7, 8
+// The display: 0 = Pimoroni Display Pack 2.8" (320 x 240), 1 = Display Pack 1.14" (240 x 135)
+// Set with cmake -B build -DFRACTALIS_SMALL_DISPLAY=ON (flash_pico.sh --small)
+#ifndef SMALL_DISPLAY
+#define SMALL_DISPLAY 0
+#endif
+#if SMALL_DISPLAY
+#define SCREEN_WIDTH 240
+#define SCREEN_HEIGHT 135
+// RGB LED pins
+#define LED_PIN_R 6
+#define LED_PIN_G 7
+#define LED_PIN_B 8
+#else
+#define SCREEN_WIDTH 320
+#define SCREEN_HEIGHT 240
 #define LED_PIN_R 26
 #define LED_PIN_G 27
 #define LED_PIN_B 28
+#endif
 
 // The settings and the view are saved to the flash this long after the last button press, if anything changed
 #define SAVE_DELAY_MS 300000
@@ -85,7 +100,7 @@
 #define FIRST_PASS_ITER 32
 // After reaching the normal limit, keep doubling it while a pass still resolves at least this many pixels
 #ifndef REFINE_MIN_PIXELS
-#define REFINE_MIN_PIXELS 768  // 1% of the screen
+#define REFINE_MIN_PIXELS (SCREEN_WIDTH * SCREEN_HEIGHT / 100)  // 1% of the screen
 #endif
 // ... up to this factor of the normal limit
 #define REFINE_MAX_FACTOR 8

@@ -2,6 +2,7 @@
 #define SETTINGS_H
 
 #include <cstdint>
+#include "globals.h"
 #include "FractalisState.h"
 
 /**
@@ -63,9 +64,10 @@ bool save(const Settings& settings);
  * Saved views, each with a small picture of it. Every slot has two sectors of its own in front of the settings.
  */
 constexpr int VIEW_SLOTS = 10;
-// The picture: 1/5 of the screen, RGB565 in display byte order
+// The picture: the screen scaled down (1/5 of the 2.8", 1/3.75 of the 1.14"), RGB565 in display byte order. Rows of
+// it must fill the flash pages.
 constexpr int THUMBNAIL_W = 64;
-constexpr int THUMBNAIL_H = 48;
+constexpr int THUMBNAIL_H = SMALL_DISPLAY ? 36 : 48;
 
 struct View {
     Coordinate center;

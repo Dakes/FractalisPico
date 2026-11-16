@@ -9,6 +9,17 @@ namespace menu {
 namespace {
 
 // Layout, top to bottom
+#if SMALL_DISPLAY
+// The 1.14": the title at the very top, the hints of A and B together at the bottom
+constexpr int HINT_TOP_Y = 3;      // the hint of X
+constexpr int TITLE_Y = 1;
+constexpr int RULE_Y = 21;
+constexpr int ROWS_Y = 23;
+constexpr int ROWS_BOTTOM = 99;
+constexpr int HELP_Y = 103;        // two lines
+constexpr int HINT_BOTTOM_Y = SCREEN_H - 12;
+constexpr int ROW_H = 18;
+#else
 constexpr int HINT_TOP_Y = 3;      // the hint of A
 constexpr int TITLE_Y = 17;        // page icon and title
 constexpr int RULE_Y = 39;
@@ -17,6 +28,7 @@ constexpr int ROWS_BOTTOM = 197;
 constexpr int HELP_Y = 202;        // two lines
 constexpr int HINT_BOTTOM_Y = SCREEN_H - 13;  // the hint of B
 constexpr int ROW_H = 24;
+#endif
 constexpr int ROW_X = 5;           // the selection box
 constexpr int ROW_W = PANEL_W - 2 * ROW_X - 2;
 constexpr int TEXT_X = 13;
@@ -475,8 +487,13 @@ void draw() {
     const int first_row = target.first_row, rows = target.rows;
 
     draw_panel_background();
+#if SMALL_DISPLAY
+    draw_hint('A', "OK", 5, HINT_BOTTOM_Y);
+    draw_hint('B', "Back  hold: close", 44, HINT_BOTTOM_Y);
+#else
     draw_hint('A', "OK", 5, HINT_TOP_Y);
     draw_hint('B', "Back   hold: close", 5, HINT_BOTTOM_Y);
+#endif
     draw_arrow_hint('X', ARROW_UP, HINT_TOP_Y);
     draw_arrow_hint('Y', ARROW_DOWN, HINT_BOTTOM_Y);
 

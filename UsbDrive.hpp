@@ -2,6 +2,7 @@
 #define USB_DRIVE_H
 
 #include <cstdint>
+#include "globals.h"
 
 /**
  * A small USB drive (FAT12, 1 MB) whose files are made up on the fly, nothing of it is stored:
@@ -21,8 +22,8 @@ namespace usb_drive {
 
 constexpr uint32_t SECTOR_SIZE = 512;
 constexpr uint32_t SECTORS = 2048;
-constexpr int IMAGE_W = 320;
-constexpr int IMAGE_H = 240;
+constexpr int IMAGE_W = SCREEN_WIDTH;
+constexpr int IMAGE_H = SCREEN_HEIGHT;
 
 // A row of the image (y from the top) as RGB565 in native byte order. Called from the USB side.
 using RowSource = void (*)(int y, uint16_t* row);

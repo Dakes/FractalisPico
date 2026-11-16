@@ -2,6 +2,7 @@
 #define PALETTE_H
 
 #include <cstdint>
+#include "globals.h"
 #include "FractalisState.h"
 
 /**
@@ -18,7 +19,7 @@ namespace palette {
 constexpr int POSITION_BITS = 20;
 constexpr int LUT_BITS = 10;
 constexpr int LUT_SIZE = 1 << LUT_BITS;
-constexpr int MAX_WIDTH = 320;  // of the screen
+constexpr int MAX_WIDTH = SCREEN_WIDTH;  // of the screen
 
 uint32_t position(float smooth_iteration);
 // Orbit traps: palette position from the smallest squared distance of the orbit to the trap (log scale)

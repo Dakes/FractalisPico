@@ -2,6 +2,7 @@
 #define MENU_H
 
 #include <cstdint>
+#include "globals.h"
 
 namespace pimoroni { class PicoGraphics; }
 
@@ -156,10 +157,10 @@ void back();
 Color color();
 
 // Screen size the layout is made for
-constexpr int SCREEN_W = 320;
-constexpr int SCREEN_H = 240;
+constexpr int SCREEN_W = SCREEN_WIDTH;
+constexpr int SCREEN_H = SCREEN_HEIGHT;
 // The panel covers the screen left of this
-constexpr int PANEL_W = 196;
+constexpr int PANEL_W = SMALL_DISPLAY ? 156 : 196;
 
 // Text colors of the menu
 constexpr Color TEXT = {235, 236, 242};
